@@ -1,9 +1,12 @@
 import com.github.sarxos.webcam.Webcam;
+import handler.H264StreamDecoder;
+import handler.H264StreamEncoder;
+import handler.StreamFrameListener;
+import org.jboss.netty.buffer.ChannelBuffer;
 
-import javax.imageio.ImageIO;
 import javax.swing.*;
 import java.awt.*;
-import java.io.ByteArrayOutputStream;
+import java.awt.image.BufferedImage;
 import java.net.*;
 import java.util.*;
 import java.util.Timer;
@@ -30,6 +33,8 @@ public class Conference {
 class Client {
     DatagramSocket datagramSocket;
     JFrame jFrame;
+    H264StreamDecoder h264StreamDecoder;
+    H264StreamEncoder h264StreamEncoder;
     Set<InetSocketAddress> destinations;
     Webcam webcam;
     public Client(Webcam webcam, InetSocketAddress source, Set<InetSocketAddress> destinations) {
@@ -37,6 +42,8 @@ class Client {
             // this.jFrame = new JFrame();
             this.datagramSocket = new DatagramSocket(source);
             this.destinations = destinations;
+            this.h264StreamDecoder = new H264StreamDecoder(null, webcam.getViewSize(), false, false);
+            this.h264StreamEncoder = new H264StreamEncoder(webcam.getViewSize(), false);
             this.webcam = webcam;
             sender();
             receiver();
@@ -46,12 +53,11 @@ class Client {
     }
     private void sender() {
         new Timer().schedule(new TimerTask() {
-            @Override public void run() {
+            @Override
+            public void run() {
                 try {
-                    // ImageIO.write(webcam.getImage(), "jpg", byteArrayOutputStream);
-                    // byte[] byteArray = byteArrayOutputStream.toByteArray();
-                    // System.out.println(byteArray.length);
-                    byte[] byteArray = {1};
+                    ChannelBuffer channelBuffer = (ChannelBuffer) h264StreamEncoder.encode(webcam.getImage());
+                    byte[] byteArray = channelBuffer.toByteBuffer().array();
                     for (InetSocketAddress destination : destinations) {
                         datagramSocket.send(new DatagramPacket(byteArray, byteArray.length, destination));
                     }
@@ -68,11 +74,17 @@ class Client {
                 DatagramPacket datagramPacket = new DatagramPacket(byteArray, byteArray.length);
                 while (true) {
                     datagramSocket.receive(datagramPacket);
-                    System.out.println(datagramPacket.getPort());
+                    System.out.println(datagramPacket.getLength());
                 }
             } catch (Exception exception) {
                 exception.printStackTrace();
             }
         }).start();
+    }
+    private class StreamFrameListenerImplementation implements StreamFrameListener {
+        @Override
+        public void onFrameReceived(BufferedImage image) {
+            System.out.println(datagramSocket.getPort());
+        }
     }
 }
