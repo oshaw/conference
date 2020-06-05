@@ -3,118 +3,106 @@ import org.openimaj.image.MBFImage;
 import org.openimaj.video.capture.VideoCapture;
 import org.openimaj.video.capture.VideoCaptureException;
 
-import javax.sound.sampled.*;
-import javax.swing.*;
 import java.awt.*;
-import java.awt.color.ColorSpace;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 import java.awt.image.*;
-import java.io.ByteArrayOutputStream;
-import java.nio.ByteBuffer;
-import java.util.Formatter;
-import java.util.List;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
+import javax.sound.sampled.*;
+import javax.swing.*;
 
-public class Client {
-    public static void main(String[] arguments) throws VideoCaptureException {
-        // Webcam
-        Dimension dimension = new Dimension(320, 240);
-        VideoCapture videoCapture = new VideoCapture((int) dimension.getHeight(), (int) dimension.getWidth());
-        // Create window
-        JFrame jFrame = new JFrame();
+class Camera {
+    VideoCapture videoCapture;
+    public Camera(Dimension dimension) {
+        try {
+            videoCapture = new VideoCapture((int) dimension.getWidth(), (int) dimension.getHeight());
+        } catch (VideoCaptureException exception) {
+            exception.printStackTrace();
+        }
+    }
+    public void read(BufferedImage bufferedImage) {
+        ImageUtilities.createBufferedImage(videoCapture.getNextFrame(), bufferedImage);
+    }
+}
+
+class Microphone {
+    TargetDataLine targetDataLine;
+    public Microphone(AudioFormat audioFormat) {
+        try {
+            targetDataLine = (TargetDataLine) AudioSystem.getLine(new DataLine.Info(TargetDataLine.class, audioFormat));
+            targetDataLine.open(audioFormat);
+            targetDataLine.start();
+        } catch (LineUnavailableException exception) {
+            exception.printStackTrace();
+        }
+    }
+    public int getBufferSize() {
+        return targetDataLine.getBufferSize();
+    }
+    public int read(byte[] arrayByte) {
+        return targetDataLine.read(arrayByte, 0, 1024);
+    }
+    public void stop() {
+        targetDataLine.close();
+    }
+}
+
+class Display {
+    JFrame jFrame = new JFrame();
+    JLabel jLabel = new JLabel();
+    ImageIcon imageIcon = new ImageIcon();
+    public Display(Dimension dimension) {
+        jLabel.setIcon(imageIcon);
         jFrame.setSize(dimension);
         jFrame.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
-        JLabel jLabel = new JLabel();
         jFrame.getContentPane().add(jLabel);
         jFrame.setVisible(true);
-        Timer timer = new Timer(1000/30, new ActionListener() {
-            @Override
-            public void actionPerformed(ActionEvent actionEvent) {
-                BufferedImage bufferedImage = ImageUtilities.createBufferedImage(videoCapture.getNextFrame());
-                jLabel.setIcon(new ImageIcon(bufferedImage));
-                jLabel.repaint();
+    }
+    public void write(BufferedImage bufferedImage) {
+        imageIcon.setImage(bufferedImage);
+        jLabel.repaint();
+    }
+}
+
+class Speaker {
+    SourceDataLine sourceDataLine;
+    public Speaker(AudioFormat audioFormat) {
+        try {
+            sourceDataLine = (SourceDataLine) AudioSystem.getLine(new DataLine.Info(SourceDataLine.class, audioFormat));
+            sourceDataLine.open(audioFormat);
+            sourceDataLine.start();
+        } catch (LineUnavailableException exception) {
+            exception.printStackTrace();
+        }
+    }
+    public void write(byte[] arrayByte) {
+        sourceDataLine.write(arrayByte, 0, 1024);
+    }
+    public void stop() {
+        sourceDataLine.drain();
+        sourceDataLine.close();
+    }
+}
+
+public class Client {
+    static AudioFormat AUDIO_FORMAT = new AudioFormat(8000.0f, 16, 1, true, true);
+    static Dimension DIMENSION = new Dimension(320, 240);
+    public static void main(String[] arguments) {
+        Camera camera = new Camera(DIMENSION);
+        Display display = new Display(DIMENSION);
+        Microphone microphone = new Microphone(AUDIO_FORMAT);
+        Speaker speaker = new Speaker(AUDIO_FORMAT);
+        Timer timer = new Timer(1000 / 30, new ActionListener() {
+            BufferedImage bufferedImage = new BufferedImage((int) DIMENSION.getWidth(), (int) DIMENSION.getHeight(), BufferedImage.TYPE_INT_ARGB);
+            byte[] arrayByte = new byte[microphone.getBufferSize() / 5];
+            @Override public void actionPerformed(ActionEvent actionEvent) {
+                camera.read(bufferedImage);
+                display.write(bufferedImage);
+                microphone.read(arrayByte);
+                speaker.write(arrayByte);
             }
         });
         timer.start();
     }
-//    public static void main(String[] arguments) throws LineUnavailableException {
-//        // Set up audio format
-//        AudioFormat audioFormat = new AudioFormat(8000.0f, 16, 1, true, true);
-//        // Microphone, speaker
-//        TargetDataLine microphone = (TargetDataLine) AudioSystem.getLine(new DataLine.Info(TargetDataLine.class, audioFormat));
-//        SourceDataLine speakers = (SourceDataLine) AudioSystem.getLine(new DataLine.Info(SourceDataLine.class, audioFormat));
-//        microphone.open(audioFormat);
-//        microphone.start();
-//        speakers.open(audioFormat);
-//        speakers.start();
-//        // Record sample
-//        ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
-//        int bytesReadTotal = 0;
-//        int bytesReadNew;
-//        byte[] byteArray = new byte[microphone.getBufferSize() / 5];
-//        while (bytesReadTotal < 1000000) {
-//            bytesReadNew = microphone.read(byteArray, 0, 1024);
-//            bytesReadTotal += bytesReadNew;
-//            byteArrayOutputStream.write(byteArray, 0, bytesReadNew);
-//            speakers.write(byteArray, 0, bytesReadNew);
-//        }
-//        microphone.close();
-//        speakers.drain();
-//        speakers.close();
-//    }
-//    public static void main(String[] arguments) throws InterruptedException {
-//        // Webcam
-//        Dimension dimension = new Dimension(320, 240);
-//        OpenIMAJGrabber openIMAJGrabber = new OpenIMAJGrabber();
-//        Pointer<Device> pointerDevice = openIMAJGrabber.getVideoDevices().get().getDevice(0);
-//        openIMAJGrabber.startSession((int) dimension.getWidth(), (int) dimension.getHeight(), 50, pointerDevice);
-//        // Set up image format
-//        int[] bytesInEachPixel = {8, 8, 8};
-//        int[] imageOffset = {0};
-//        int[] rgbOffsets = {0, 1, 2};
-//        ColorModel colorModel = new ComponentColorModel(
-//            ColorSpace.getInstance(ColorSpace.CS_sRGB),
-//            bytesInEachPixel,
-//            false,
-//            false,
-//            Transparency.OPAQUE,
-//            DataBuffer.TYPE_BYTE
-//        );
-//        ComponentSampleModel componentSampleModel = new ComponentSampleModel(
-//            DataBuffer.TYPE_BYTE,
-//            (int) dimension.getWidth(),
-//            (int) dimension.getHeight(),
-//            3,
-//            (int) dimension.getWidth() * 3,
-//            rgbOffsets
-//        );
-//        // Create window
-//        JFrame jFrame = new JFrame();
-//        jFrame.setSize(dimension);
-//        jFrame.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
-//        JLabel jLabel = new JLabel();
-//        jFrame.getContentPane().add(jLabel);
-//        jFrame.setVisible(true);
-//        // Stream video
-//        Timer timer = new Timer(1000/30, new ActionListener() {
-//            @Override
-//            public void actionPerformed(ActionEvent actionEvent) {
-//                // Take image
-//                byte[] byteArray = new byte[(int) (dimension.getWidth() * dimension.getHeight() * 3)];
-//                byte[][] byteMatrix = new byte[][] {byteArray};
-//                Pointer<Byte> pointerImage = openIMAJGrabber.getImage();
-//                ByteBuffer byteBuffer = pointerImage.getByteBuffer((int) (dimension.getWidth() * dimension.getHeight() * 3));
-//                byteBuffer.get(byteArray);
-//                DataBufferByte dataBufferByte = new DataBufferByte(byteMatrix, byteArray.length, imageOffset);
-//                WritableRaster writableRaster = Raster.createWritableRaster(componentSampleModel, dataBufferByte, null);
-//                BufferedImage bufferedImage = new BufferedImage(colorModel, writableRaster, false, null);
-//                bufferedImage.flush();
-//                // Display image
-//                jLabel.setIcon(new ImageIcon(bufferedImage));
-//                jLabel.repaint();
-//                jFrame.repaint();
-//            }
-//        });
-//        timer.start();
-//    }
 }
