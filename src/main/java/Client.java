@@ -2,19 +2,17 @@ import org.openimaj.image.ImageUtilities;
 import org.openimaj.video.capture.VideoCapture;
 import org.openimaj.video.capture.VideoCaptureException;
 
+import javax.sound.sampled.*;
+import javax.swing.*;
 import java.awt.*;
 import java.awt.event.ActionEvent;
-import java.awt.image.*;
+import java.awt.image.BufferedImage;
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetSocketAddress;
 import java.net.SocketException;
-import java.util.Arrays;
-import java.util.HashSet;
-import java.util.Set;
-import javax.sound.sampled.*;
-import javax.swing.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 class Camera {
     VideoCapture videoCapture;
@@ -58,22 +56,41 @@ class Microphone {
     }
 }
 
-class Display {
+class Window {
+    ConcurrentHashMap<String, JLabel> addressToJLabel = new ConcurrentHashMap<>();
+    GridLayout gridLayout = new GridLayout();
     JFrame jFrame = new JFrame();
-    JLabel jLabel = new JLabel();
-    ImageIcon imageIcon = new ImageIcon();
 
-    public Display(Dimension dimension) {
-        jLabel.setIcon(imageIcon);
-        jFrame.setSize(dimension);
+    public Window() {
         jFrame.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
-        jFrame.getContentPane().add(jLabel);
         jFrame.setVisible(true);
+        jFrame.setLayout(gridLayout);
     }
 
-    public void write(BufferedImage bufferedImage) {
-        imageIcon.setImage(bufferedImage);
-        jLabel.repaint();
+    public void addVideo(String address) {
+        addressToJLabel.put(address, new JLabel());
+        addressToJLabel.get(address).setIcon(new ImageIcon());
+        jFrame.add(addressToJLabel.get(address));
+        updateGrid();
+    }
+
+    public void removeVideo(String address) {
+        jFrame.remove(addressToJLabel.get(address));
+        addressToJLabel.remove(address);
+        updateGrid();
+    }
+
+    public void write(String address, BufferedImage bufferedImage) {
+        ((ImageIcon) addressToJLabel.get(address).getIcon()).setImage(bufferedImage);
+        addressToJLabel.get(address).repaint();
+    }
+
+    void updateGrid() {
+        if (0 < addressToJLabel.size()) {
+            gridLayout.setColumns((int) Math.ceil(Math.sqrt(addressToJLabel.size())));
+            gridLayout.setRows((int) Math.floor(addressToJLabel.size() / gridLayout.getColumns()));
+            jFrame.repaint();
+        }
     }
 }
 
@@ -106,25 +123,35 @@ public class Client {
     static int SIZE_UDP_PACKET_MAX = 508;
 
     Camera camera = new Camera(DIMENSION);
-    Display display = new Display(DIMENSION);
     Microphone microphone = new Microphone(AUDIO_FORMAT);
     Speaker speaker = new Speaker(AUDIO_FORMAT);
+    Window window = new Window();
 
     DatagramSocket datagramSocket;
-    Set<InetSocketAddress> destinations;
+    ConcurrentHashMap<String, InetSocketAddress> destinations = new ConcurrentHashMap<>();
 
     Thread threadReceiver = new Thread(new Receiver());
     Thread threadSender = new Thread(new Sender());
 
-    public Client(InetSocketAddress source, Set<InetSocketAddress> destinations) {
+    public Client(InetSocketAddress source) {
         try {
             datagramSocket = new DatagramSocket(source);
-            this.destinations = destinations;
+            window.addVideo(source.toString());
         } catch (SocketException exception) {
             exception.printStackTrace();
         }
         threadReceiver.start();
         threadSender.start();
+    }
+
+    public void addDestination(InetSocketAddress destination) {
+        destinations.put(destination.toString(), destination);
+        window.addVideo(destination.toString());
+    }
+
+    public void removeDestination(InetSocketAddress destination) {
+        destinations.remove(destination.toString());
+        window.removeVideo(destination.toString());
     }
 
     class Sender implements Runnable {
@@ -136,12 +163,12 @@ public class Client {
         @Override public void run() {
             Timer timer = new Timer(1000 / 30, (ActionEvent actionEvent) -> {
                 camera.read(bufferedImage);
-                display.write(bufferedImage);
+                window.write("localhost" + datagramSocket.getLocalSocketAddress().toString(), bufferedImage);
                 microphone.read(bytesMicrophone);
                 speaker.write(bytesMicrophone);
                 datagramPacket.setData(bytesMicrophone, 0, bytesMicrophone.length);
                 try {
-                    for (InetSocketAddress destination : destinations) {
+                    for (InetSocketAddress destination : destinations.values()) {
                         datagramPacket.setSocketAddress(destination);
                         datagramSocket.send(datagramPacket);
                     }
@@ -161,7 +188,6 @@ public class Client {
             try {
                 while (true) {
                     datagramSocket.receive(datagramPacket);
-                    System.out.println(datagramPacket.getLength());
                 }
             } catch (IOException exception) {
                 exception.printStackTrace();
@@ -176,10 +202,16 @@ public class Client {
             new InetSocketAddress("localhost", 20002),
         };
         Client[] clients = {
-            new Client(inetSocketAddresses[0], new HashSet<InetSocketAddress>(Arrays.asList(inetSocketAddresses[1], inetSocketAddresses[2]))),
-            new Client(inetSocketAddresses[1], new HashSet<InetSocketAddress>(Arrays.asList(inetSocketAddresses[0], inetSocketAddresses[2]))),
-            new Client(inetSocketAddresses[2], new HashSet<InetSocketAddress>(Arrays.asList(inetSocketAddresses[0], inetSocketAddresses[1])))
+            new Client(inetSocketAddresses[0]),
+            new Client(inetSocketAddresses[1]),
+            new Client(inetSocketAddresses[2])
         };
+        clients[0].addDestination(inetSocketAddresses[1]);
+        clients[0].addDestination(inetSocketAddresses[2]);
+        clients[1].addDestination(inetSocketAddresses[0]);
+        clients[1].addDestination(inetSocketAddresses[2]);
+        clients[2].addDestination(inetSocketAddresses[0]);
+        clients[2].addDestination(inetSocketAddresses[1]);
         while (true);
     }
 }
