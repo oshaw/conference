@@ -1,5 +1,15 @@
 package subscribers;
 
+import publishers.Publisher;
+
+import java.util.HashMap;
+
 public abstract class Subscriber<T> {
-    abstract void receive(T t);
+    HashMap<Publisher, Integer> publisherToInt;
+
+    public abstract void receive(T t);
+
+    public void subscribe(Publisher publisher) {
+
+    }
 }

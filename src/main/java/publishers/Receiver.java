@@ -1,27 +1,29 @@
 package publishers;
 
 import utilities.BufferCircular;
+import utilities.Packet;
 
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 
-public class Receiver extends Publisher<DatagramPacket> {
+public class Receiver extends Publisher<Packet> {
     DatagramPacket datagramPacket;
     DatagramSocket datagramSocket;
+    Packet packet;
     Thread thread;
 
     public Receiver(DatagramSocket datagramSocket) {
         this.datagramSocket = datagramSocket;
-        buffer = new BufferCircular<>(new DatagramPacket[16]);
+        buffer = new BufferCircular<>(new Packet[16]);
         thread = new Thread(() -> {while (true) publish();});
     }
 
     @Override void publish() {
         try {
-            datagramPacket = buffer.getAvailableSlot();
+            packet = buffer.getAvailableSlot();
             datagramSocket.receive(datagramPacket);
-            buffer.receive();
+            buffer.markSlotFilled();
         } catch (IOException exception) {
             exception.printStackTrace();
         }

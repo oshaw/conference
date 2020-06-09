@@ -4,20 +4,25 @@ import org.openimaj.image.ImageUtilities;
 import org.openimaj.video.capture.VideoCapture;
 import org.openimaj.video.capture.VideoCaptureException;
 import utilities.BufferCircular;
+import utilities.PacketVideo;
 
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.ActionEvent;
-import java.awt.image.BufferedImage;
+import java.net.SocketAddress;
 
-public class Camera extends Publisher<BufferedImage> {
+public class Camera extends Publisher<PacketVideo> {
     int framesPerSecond = 30;
+    PacketVideo packetVideo;
     Timer timer;
     VideoCapture videoCapture;
 
-    public Camera(Dimension dimension) {
+    public Camera(SocketAddress socketAddress, Dimension dimension) {
         try {
-            buffer = new BufferCircular<>(new BufferedImage[16]);
+            PacketVideo[] packetVideos = new PacketVideo[16];
+            for (PacketVideo packetVideo : packetVideos) packetVideo.socketAddress = socketAddress;
+            buffer = new BufferCircular<>(packetVideos);
+
             videoCapture = new VideoCapture((int) dimension.getWidth(), (int) dimension.getHeight());
             timer = new Timer(1000 / framesPerSecond, (ActionEvent actionEvent) -> publish());
             timer.start();
@@ -27,7 +32,8 @@ public class Camera extends Publisher<BufferedImage> {
     }
 
     @Override public void publish() {
-        ImageUtilities.createBufferedImage(videoCapture.getNextFrame(), buffer.getAvailableSlot());
-        buffer.receive();
+        packetVideo = buffer.getAvailableSlot();
+        ImageUtilities.createBufferedImage(videoCapture.getNextFrame(), packetVideo.bufferedImage);
+        buffer.markSlotFilled();
     }
 }

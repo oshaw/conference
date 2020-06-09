@@ -1,21 +1,26 @@
 package publishers;
 
 import utilities.BufferCircular;
+import utilities.PacketAudio;
 
 import javax.sound.sampled.*;
 import javax.swing.*;
 import java.awt.event.ActionEvent;
+import java.net.SocketAddress;
 import java.util.Arrays;
 
-public class Microphone extends Publisher<byte[]> {
+public class Microphone extends Publisher<PacketAudio> {
     byte[] bytes;
     int bytesRead;
     TargetDataLine targetDataLine;
     Timer timer;
 
-    public Microphone(AudioFormat audioFormat) {
+    public Microphone(SocketAddress socketAddress, AudioFormat audioFormat) {
         try {
-            buffer = new BufferCircular<>(new byte[508][16]);
+            PacketAudio[] packetAudios = new PacketAudio[16];
+            for (PacketAudio packetVideo : packetAudios) packetVideo.socketAddress = socketAddress;
+            buffer = new BufferCircular<>(packetAudios);
+
             targetDataLine = (TargetDataLine) AudioSystem.getLine(new DataLine.Info(TargetDataLine.class, audioFormat));
             targetDataLine.open(audioFormat);
             targetDataLine.start();
@@ -27,9 +32,9 @@ public class Microphone extends Publisher<byte[]> {
     }
 
     @Override public void publish() {
-        bytes = buffer.getAvailableSlot();
-        bytesRead = targetDataLine.read(bytes, 0, Math.min(targetDataLine.available(), bytes.length));
+        PacketAudio packetAudio = buffer.getAvailableSlot();
+        bytesRead = targetDataLine.read(packetAudio.bytes, 0, Math.min(targetDataLine.available(), bytes.length));
         Arrays.fill(bytes, bytesRead, bytes.length, (byte) 0);
-        buffer.receive();
+        buffer.markSlotFilled();
     }
 }

@@ -32,8 +32,8 @@ public class Client {
         try {
             this.destinations = destinations;
 
-            microphone = new Microphone(audioFormat);
-            camera = new Camera(dimension);
+            microphone = new Microphone(source, audioFormat);
+            camera = new Camera(source, dimension);
             speaker = new Speaker(audioFormat);
             window = new Window();
 
@@ -41,11 +41,11 @@ public class Client {
             receiver = new Receiver(datagramSocket);
             sender = new Sender(datagramSocket, destinations);
 
-            camera.addSubscriber(sender);
-            camera.addSubscriber(window);
-            microphone.addSubscriber(sender);
-            receiver.addSubscriber(speaker);
-            receiver.addSubscriber(window);
+            sender.subscribe(camera);
+            sender.subscribe(microphone);
+            speaker.subscribe(receiver);
+            window.subscribe(camera);
+            window.subscribe(receiver);
         } catch (SocketException exception) {
             exception.printStackTrace();
         }
@@ -63,7 +63,6 @@ public class Client {
             new Client(inetSocketAddresses[1], new HashSet<InetSocketAddress>(Arrays.asList(inetSocketAddresses[0], inetSocketAddresses[2]))),
             new Client(inetSocketAddresses[2], new HashSet<InetSocketAddress>(Arrays.asList(inetSocketAddresses[0], inetSocketAddresses[1])))
         };
-
         while (true);
     }
 }
