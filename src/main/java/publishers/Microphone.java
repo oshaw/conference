@@ -12,7 +12,6 @@ import java.time.Instant;
 import java.util.Arrays;
 
 public class Microphone extends Publisher<PacketAudio> {
-    byte[] bytes;
     int bytesRead;
     ObjectPool<PacketAudio> objectPool = ObjectPoolPacketAudio.getSingleton();
     PacketAudio packetAudio;
@@ -36,8 +35,8 @@ public class Microphone extends Publisher<PacketAudio> {
             packetAudio = objectPool.allocate();
             packetAudio.socketAddress = socketAddress;
             packetAudio.instant = Instant.now();
-            bytesRead = targetDataLine.read(packetAudio.bytes, 0, Math.min(targetDataLine.available(), bytes.length));
-            Arrays.fill(bytes, bytesRead, bytes.length, (byte) 0);
+            bytesRead = targetDataLine.read(packetAudio.bytes, 0, Math.min(targetDataLine.available(), packetAudio.bytes.length));
+            Arrays.fill(packetAudio.bytes, bytesRead, packetAudio.bytes.length, (byte) 0);
             bufferCircular.put(packetAudio);
         });
         timer.start();

@@ -1,12 +1,17 @@
 package publishers;
 
 import utilities.BufferCircular;
+import utilities.ObjectPool;
 
 public abstract class Publisher<T> {
-    BufferCircular<T> bufferCircular = new BufferCircular<>(16);
-     
+    protected BufferCircular<T> bufferCircular;
+    
+    Publisher(ObjectPool<T> objectPool) {
+        bufferCircular = new BufferCircular<>(objectPool, 16);
+    }
+    
     public int addSubscriber() {
-        return 0;
+        return bufferCircular.addSubscriber();
     }
     
     public T get(int id) {

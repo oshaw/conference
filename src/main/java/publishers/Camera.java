@@ -22,6 +22,7 @@ public class Camera extends Publisher<PacketVideo> {
     VideoCapture videoCapture;
 
     public Camera(Dimension dimension) {
+        super(ObjectPoolPacketVideo.getSingleton());
         try {
             videoCapture = new VideoCapture((int) dimension.getWidth(), (int) dimension.getHeight());
         } catch (VideoCaptureException exception) {

@@ -1,16 +1,12 @@
 package utilities;
 
-import java.net.SocketAddress;
-
 public class PacketAudio extends Packet {
-    public byte[] bytes;
-
-    public static Packet[] factory(int size, SocketAddress socketAddress) {
-        Packet[] packets = new PacketAudio[size];
-        for (int index = 0; index < size; index += 1) {
-            packets[index] = new PacketAudio();
-            packets[index].socketAddress = socketAddress;
+    public byte[] bytes = new byte[508];
+    public static Factory<PacketAudio> factory = new FactoryPacketAudio();
+    
+    public static class FactoryPacketAudio implements Factory<PacketAudio> {
+        @Override public PacketAudio get() {
+            return new PacketAudio();
         }
-        return packets;
     }
 }

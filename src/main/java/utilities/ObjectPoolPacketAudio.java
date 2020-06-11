@@ -1,9 +1,10 @@
 package utilities;
 
 public class ObjectPoolPacketAudio {
-    private static final ObjectPool<PacketAudio> singleton = new ObjectPool<>(16);
+    private static ObjectPool<PacketAudio> singleton;
     
     public static ObjectPool<PacketAudio> getSingleton() {
+        if (singleton == null) singleton = new ObjectPool<>(PacketAudio.factory, 16);
         return singleton;
     }
 }

@@ -41,11 +41,11 @@ public class Client {
             sender = new Sender(datagramSocket, destinations);
             window = new Window();
             
-            sender.subscribe(camera);
-            sender.subscribe(microphone);
-            speaker.subscribe(receiver);
-            window.subscribe(camera);
-            window.subscribe(receiver);
+            sender.subscribeTo(camera);
+            sender.subscribeTo(microphone);
+            speaker.subscribeTo(receiver);
+            window.subscribeTo(camera);
+            window.subscribeTo(receiver);
         } catch (SocketException exception) {
             exception.printStackTrace();
         }
@@ -59,9 +59,9 @@ public class Client {
         };
 
         Client[] clients = {
-            new Client(inetSocketAddresses[0], new HashSet<InetSocketAddress>(Arrays.asList(inetSocketAddresses[1], inetSocketAddresses[2]))),
-            new Client(inetSocketAddresses[1], new HashSet<InetSocketAddress>(Arrays.asList(inetSocketAddresses[0], inetSocketAddresses[2]))),
-            new Client(inetSocketAddresses[2], new HashSet<InetSocketAddress>(Arrays.asList(inetSocketAddresses[0], inetSocketAddresses[1])))
+            new Client(inetSocketAddresses[0], new HashSet<>(Arrays.asList(inetSocketAddresses[1], inetSocketAddresses[2]))),
+            new Client(inetSocketAddresses[1], new HashSet<>(Arrays.asList(inetSocketAddresses[0], inetSocketAddresses[2]))),
+            new Client(inetSocketAddresses[2], new HashSet<>(Arrays.asList(inetSocketAddresses[0], inetSocketAddresses[1])))
         };
         while (true);
     }
