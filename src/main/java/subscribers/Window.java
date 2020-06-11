@@ -1,13 +1,14 @@
 package subscribers;
 
+import utilities.PacketVideo;
+
 import javax.swing.*;
 import java.awt.*;
-import java.awt.image.BufferedImage;
-import java.net.DatagramPacket;
+import java.net.SocketAddress;
 import java.util.concurrent.ConcurrentHashMap;
 
-public class Window extends Subscriber<DatagramPacket> {
-    ConcurrentHashMap<String, JLabel> addressToJLabel = new ConcurrentHashMap<>();
+public class Window extends Subscriber<PacketVideo> {
+    ConcurrentHashMap<SocketAddress, JLabel> socketAddressToJLabel = new ConcurrentHashMap<>();
     GridLayout gridLayout = new GridLayout();
     JFrame jFrame = new JFrame();
 
@@ -17,30 +18,29 @@ public class Window extends Subscriber<DatagramPacket> {
         jFrame.setLayout(gridLayout);
     }
 
-    public void addVideo(String address) {
-        addressToJLabel.put(address, new JLabel());
-        addressToJLabel.get(address).setIcon(new ImageIcon());
-        jFrame.add(addressToJLabel.get(address));
+    public void addSocketAddress(SocketAddress socketAddress) {
+        socketAddressToJLabel.put(socketAddress, new JLabel());
+        socketAddressToJLabel.get(socketAddress).setIcon(new ImageIcon());
+        jFrame.add(socketAddressToJLabel.get(socketAddress));
         updateGrid();
     }
 
-    public void removeVideo(String address) {
-        jFrame.remove(addressToJLabel.get(address));
-        addressToJLabel.remove(address);
+    public void removeSocketAddress(SocketAddress socketAddress) {
+        jFrame.remove(socketAddressToJLabel.get(socketAddress));
+        socketAddressToJLabel.remove(socketAddress);
         updateGrid();
     }
 
-    @Override public void receive(DatagramPacket datagramPacket) {
-        BufferedImage bufferedImage = new BufferedImage(); // datagramPacket.getData()
-        String address = datagramPacket.getSocketAddress().toString();
-        ((ImageIcon) addressToJLabel.get(address).getIcon()).setImage(bufferedImage);
-        addressToJLabel.get(address).repaint();
+    @Override public void receive(PacketVideo packetVideo) {
+        ((ImageIcon) socketAddressToJLabel.get(packetVideo.socketAddress).getIcon())
+            .setImage(packetVideo.bufferedImage);
+        socketAddressToJLabel.get(packetVideo.socketAddress).repaint();
     }
 
     void updateGrid() {
-        if (0 < addressToJLabel.size()) {
-            gridLayout.setColumns((int) Math.ceil(Math.sqrt(addressToJLabel.size())));
-            gridLayout.setRows((int) Math.floor(addressToJLabel.size() / gridLayout.getColumns()));
+        if (0 < socketAddressToJLabel.size()) {
+            gridLayout.setColumns((int) Math.ceil(Math.sqrt(socketAddressToJLabel.size())));
+            gridLayout.setRows((int) Math.floor(socketAddressToJLabel.size() / gridLayout.getColumns()));
             jFrame.repaint();
         }
     }

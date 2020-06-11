@@ -1,43 +1,37 @@
 package utilities;
 
-import subscribers.Subscriber;
-
 import java.util.Collections;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class BufferCircular<T> {
     T[] array;
     int mask;
 
-    ConcurrentHashMap<Subscriber<T>, Integer> subscriberToIndex;
-    int lowestSubscriberIndex;
-    int producerIndex;
+    ConcurrentHashMap<Integer, Integer> subscriberIdToIndex = new ConcurrentHashMap<>();
+    AtomicInteger atomicInteger;
+    int publisherIndex;
 
-    public BufferCircular(T[] array) {
-        this.array = array;
-        mask = (byte) array.length;
+    public BufferCircular(int size) {
+        array = (T[]) new Object[size];
+        mask = (byte) size;
+    }
+    
+    public void put(T t) {
+        
+    }
+    
+    public T get(int id) {
+        return array[subscriberIdToIndex.get(id)];
     }
 
-    public void subscribe(Subscriber<T> subscriber) {
-        subscriberToIndex.put(subscriber, producerIndex);
-        while (subscriberToIndex.containsKey(subscriber)) {
-            while (subscriberToIndex.get(subscriber) < producerIndex) {
-                subscriber.receive(array[subscriberToIndex.get(subscriber) & mask]);
-                subscriberToIndex.put(subscriber, subscriberToIndex.get(subscriber));
-            }
-        }
-    }
-
-    public T getAvailableSlot() {
-        while (getLowestSubscriberIndex() <= producerIndex - array.length);
-        return array[producerIndex & mask];
-    }
-
-    public void markSlotFilled() {
-        producerIndex += 1;
+    public int addSubscriber() {
+        int id = atomicInteger.getAndIncrement();
+        subscriberIdToIndex.put(id, 0);
+        return id;
     }
 
     private int getLowestSubscriberIndex() {
-        return Collections.min(subscriberToIndex.values());
+        return subscriberIdToIndex.isEmpty() ? 0 : Collections.min(subscriberIdToIndex.values());
     }
 }

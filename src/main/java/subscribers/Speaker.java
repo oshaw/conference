@@ -1,9 +1,10 @@
 package subscribers;
 
+import utilities.PacketAudio;
+
 import javax.sound.sampled.*;
 
-public class Speaker implements Subscriber<byte[]> {
-    short bytesAvailable;
+public class Speaker extends Subscriber<PacketAudio> {
     SourceDataLine sourceDataLine;
 
     public Speaker(AudioFormat audioFormat) {
@@ -16,12 +17,7 @@ public class Speaker implements Subscriber<byte[]> {
         }
     }
 
-    @Override public void receive(byte[] bytes) {
-        sourceDataLine.write(bytes, 2, (short) (((bytes[0] & 0xFF) << 8) | (bytes[1] & 0xFF)));
-    }
-
-    public void stop() {
-        sourceDataLine.drain();
-        sourceDataLine.close();
+    @Override public void receive(PacketAudio packetAudio) {
+        sourceDataLine.write(packetAudio.bytes, 0, packetAudio.bytes.length);
     }
 }

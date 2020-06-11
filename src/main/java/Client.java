@@ -31,16 +31,16 @@ public class Client {
     public Client(InetSocketAddress source, Set<InetSocketAddress> destinations) {
         try {
             this.destinations = destinations;
-
-            microphone = new Microphone(source, audioFormat);
-            camera = new Camera(source, dimension);
-            speaker = new Speaker(audioFormat);
-            window = new Window();
-
             datagramSocket = new DatagramSocket(source);
-            receiver = new Receiver(datagramSocket);
-            sender = new Sender(datagramSocket, destinations);
 
+            microphone = new Microphone(audioFormat);
+            camera = new Camera(dimension);
+            receiver = new Receiver(datagramSocket);
+
+            speaker = new Speaker(audioFormat);
+            sender = new Sender(datagramSocket, destinations);
+            window = new Window();
+            
             sender.subscribe(camera);
             sender.subscribe(microphone);
             speaker.subscribe(receiver);
@@ -50,7 +50,7 @@ public class Client {
             exception.printStackTrace();
         }
     }
-
+    
     public static void main(String[] arguments) {
         InetSocketAddress[] inetSocketAddresses = {
             new InetSocketAddress("localhost", 20000),
