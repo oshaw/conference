@@ -16,13 +16,11 @@ import java.time.Instant;
 public class Camera extends Publisher<PacketVideo> {
     int framesPerSecond = 30;
     PacketVideo packetVideo;
-    ObjectPool<PacketVideo> objectPool = ObjectPoolPacketVideo.getSingleton();
     SocketAddress socketAddress;
     Timer timer;
     VideoCapture videoCapture;
 
     public Camera(Dimension dimension) {
-        super(ObjectPoolPacketVideo.getSingleton());
         try {
             videoCapture = new VideoCapture((int) dimension.getWidth(), (int) dimension.getHeight());
         } catch (VideoCaptureException exception) {
@@ -33,11 +31,11 @@ public class Camera extends Publisher<PacketVideo> {
 
     private void run() {
         timer = new Timer(1000 / framesPerSecond, (ActionEvent actionEvent) -> {
-            packetVideo = objectPool.allocate();
+            packetVideo = bufferCircular.allocate();
             packetVideo.socketAddress = socketAddress;
             packetVideo.instant = Instant.now();
             ImageUtilities.createBufferedImage(videoCapture.getNextFrame(), packetVideo.bufferedImage);
-            bufferCircular.put(packetVideo);
+            bufferCircular.put();
         });
         timer.start();
     }

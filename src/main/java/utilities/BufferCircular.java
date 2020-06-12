@@ -4,30 +4,25 @@ import java.util.Collections;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
-public class BufferCircular<T> {
+public class BufferCircular<T extends Factory> {
     T[] array;
     int mask;
     int size;
 
     AtomicInteger atomicInteger;
     ConcurrentHashMap<Integer, Integer> subscriberIdToIndex = new ConcurrentHashMap<>();
-    ObjectPool<T> objectPool;
     int publisherIndex;
 
-    public BufferCircular(ObjectPool<T> objectPool, int size) {
-        this.objectPool = objectPool;
+    public BufferCircular(int size) {
         this.size = size;
+        T.get();
         array = (T[]) new Object[size];
         mask = (byte) size;
     }
     
-    public void put(T t) {
+    public T allocate() {
         while (getLowestSubscriberIndex() == publisherIndex - size);
-        synchronized (this) {
-            array[publisherIndex++] = t;
-            objectPool.deallocate(array[publisher]);
-        }
-        
+        return array[publisherIndex % mask];
     }
     
     public T get(int id) {
