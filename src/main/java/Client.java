@@ -4,8 +4,6 @@ import io.aeron.Publication;
 import io.aeron.Subscription;
 import io.aeron.driver.MediaDriver;
 import io.aeron.logbuffer.FragmentHandler;
-import org.agrona.concurrent.BackoffIdleStrategy;
-import org.agrona.concurrent.IdleStrategy;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.openimaj.image.ImageUtilities;
 import org.openimaj.video.capture.VideoCapture;
@@ -20,7 +18,6 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
-import java.util.concurrent.TimeUnit;
 
 public class Client {
     AudioFormat audioFormat = new AudioFormat(8000.0f, 16, 1, true, true);
@@ -32,12 +29,6 @@ public class Client {
         try {
             Aeron aeron = Aeron.connect(context);
             String channel = "aeron:udp?endpoint=" + destination.getHostName() + ":" + destination.getPort();
-            final IdleStrategy idleStrategy = new BackoffIdleStrategy(
-                100,
-                10,
-                TimeUnit.MICROSECONDS.toNanos(100),
-                TimeUnit.MICROSECONDS.toNanos(10000)
-            );
             
             TargetDataLine targetDataLine = (TargetDataLine) AudioSystem.getLine(new DataLine.Info(TargetDataLine.class, audioFormat));
             VideoCapture videoCapture = new VideoCapture((int) dimension.getWidth(), (int) dimension.getHeight());
@@ -58,11 +49,10 @@ public class Client {
 
             Publication publication = aeron.addPublication(channel, 1001);
             Timer timerAudio = new Timer(1000 / 10, (ActionEvent actionEvent) -> {
-                UnsafeBuffer unsafeBuffer = new UnsafeBuffer();
-                targetDataLine.read(unsafeBuffer.byteArray(), 0, Math.min(targetDataLine.available(), 1000));
-                long outcome = publication.offer(unsafeBuffer);
-                System.out.println(source.getPort() + ".timerAudio.offer() = " + outcome);
-                if (outcome < 0) idleStrategy.idle();
+                byte[] bytes = new byte[1000];
+                targetDataLine.read(bytes, 0, Math.min(targetDataLine.available(), bytes.length));
+                long outcome = publication.offer(new UnsafeBuffer(bytes));
+                if (outcome < 0) System.out.println(source.getPort() + ".timerAudio.offer() = " + outcome);
             });
             Timer timerVideo = new Timer(1000 / 20, (ActionEvent actionEvent) -> {
                 try {
@@ -75,14 +65,11 @@ public class Client {
                     ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
                     ImageIO.write(bufferedImage, "png", byteArrayOutputStream);
                     long outcome = publication.offer(new UnsafeBuffer(byteArrayOutputStream.toByteArray()));
-                    System.out.println(source.getPort() + ".timerVideo.offer() = " + outcome);
-                    if (outcome < 0) idleStrategy.idle();
+                    if (outcome < 0) System.out.println(source.getPort() + ".timerVideo.offer() = " + outcome);
                 } catch (Exception exception) {
                     exception.printStackTrace();
                 }
             });
-            timerAudio.start();
-            timerVideo.start();
               
             Subscription subscription = aeron.addSubscription(channel, 1001);
             Thread thread = new Thread(() -> {
@@ -107,7 +94,10 @@ public class Client {
                 FragmentAssembler fragmentAssembler = new FragmentAssembler(fragmentHandler);
                 while (true) subscription.poll(fragmentAssembler, 10);
             });
+            
             thread.start();
+            timerAudio.start();
+            timerVideo.start();
         } catch (Exception exception) {
             exception.printStackTrace();
         }
