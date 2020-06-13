@@ -1,0 +1,9 @@
+<component name="libraryTable">
+  <library name="aeron-all-1.28.3-SNAPSHOT">
+    <CLASSES>
+      <root url="jar://$PROJECT_DIR$/src/main/resources/aeron-all-1.28.3-SNAPSHOT.jar!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>
