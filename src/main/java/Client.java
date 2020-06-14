@@ -4,7 +4,9 @@ import io.aeron.Publication;
 import io.aeron.Subscription;
 import io.aeron.driver.MediaDriver;
 import io.aeron.logbuffer.FragmentHandler;
+import org.agrona.DirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
+import org.agrona.io.DirectBufferInputStream;
 import org.openimaj.image.ImageUtilities;
 import org.openimaj.video.capture.VideoCapture;
 import org.openimaj.video.capture.VideoCaptureException;
@@ -15,52 +17,76 @@ import javax.swing.*;
 import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.awt.image.BufferedImage;
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.Map;
 
-class Type {
-    final public static byte AUDIO = 0;
-    final public static byte VIDEO = 1;
+class Packet {
+    public static final byte SIZE_HEAD = 1;
+    public static final byte TYPE_AUDIO = 0;
+    public static final byte TYPE_VIDEO = 1;
+    
+    public UnsafeBuffer head;
+    public UnsafeBuffer body;
+    boolean fromSingleBuffer;
+    
+    public Packet() {
+        head = new UnsafeBuffer(new byte[SIZE_HEAD]);
+        body = new UnsafeBuffer();
+        fromSingleBuffer = false;
+    }
+    public Packet(DirectBuffer directBuffer) {
+        head = new UnsafeBuffer(directBuffer, 0, SIZE_HEAD);
+        body = new UnsafeBuffer(directBuffer, SIZE_HEAD, directBuffer.capacity() - SIZE_HEAD);
+        fromSingleBuffer = true;
+    }
+    public int getBodyLength() { return fromSingleBuffer ? body.capacity() - SIZE_HEAD : body.capacity(); }
+    public byte getType() { return head.getByte(0); }
+    public void setType(byte type) { head.putByte(0, type); }
+    // public void setTimeTriggered(long timeTriggered) { head.putLong(1, timeTriggered); }
+}
+
+interface Subscriber {
+    void take(Packet packet);
 }
 
 class Camera {
     public Camera(Dimension dimension, Sender sender, Window window) throws VideoCaptureException {
         VideoCapture videoCapture = new VideoCapture((int) dimension.getWidth(), (int) dimension.getHeight());
         new Timer(1000 / 30, (ActionEvent actionEvent) -> {
-            long timeTriggered = System.nanoTime();
-            BufferedImage bufferedImage = new BufferedImage(
-                (int) dimension.getWidth(),
-                (int) dimension.getHeight(),
-                BufferedImage.TYPE_INT_ARGB
-            );
+            Packet packet = new Packet();
+            packet.setType(Packet.TYPE_VIDEO);
+            // packet.setTimeTriggered(actionEvent.getWhen());
+            
+            BufferedImage bufferedImage = new BufferedImage((int) dimension.getWidth(), (int) dimension.getHeight(), BufferedImage.TYPE_INT_ARGB);
             ImageUtilities.createBufferedImage(videoCapture.getNextFrame(), bufferedImage);
             ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
-            try {
-                ImageIO.write(bufferedImage, "png", byteArrayOutputStream);
-            } catch (Exception exception) {
-                exception.printStackTrace();
-            }
-            byte[] bytes = byteArrayOutputStream.toByteArray();
-            sender.take(Type.VIDEO, timeTriggered, bytes);
-            window.take(0, 0, bytes);
+            try { ImageIO.write(bufferedImage, "png", byteArrayOutputStream); }
+            catch (Exception exception) { exception.printStackTrace(); }
+            packet.body.wrap(byteArrayOutputStream.toByteArray());
+            
+            sender.take(packet);
+            window.take(packet);
         }).start();
     }
 }
 
 class Microphone {
-    public Microphone(AudioFormat audioFormat, Sender sender) throws LineUnavailableException {
+    public Microphone(AudioFormat audioFormat, Sender sender, Speaker speaker) throws LineUnavailableException {
         TargetDataLine targetDataLine = (TargetDataLine) AudioSystem.getLine(new DataLine.Info(TargetDataLine.class, audioFormat));
         targetDataLine.open(audioFormat);
         targetDataLine.start();
         new Timer(1000 / 30, (ActionEvent actionEvent) -> {
-            long timeTriggered = System.nanoTime();
-            byte[] bytes = new byte[targetDataLine.available()];
-            targetDataLine.read(bytes, 0, bytes.length);
-            sender.take(Type.AUDIO, timeTriggered, bytes);
+            Packet packet = new Packet();
+            packet.setType(Packet.TYPE_AUDIO);
+            // packet.setTimeTriggered(actionEvent.getWhen());
+
+            packet.body.wrap(new byte[targetDataLine.available()]);
+            targetDataLine.read(packet.body.byteArray(), 0, packet.body.capacity());
+
+//            sender.take(packet);
+            speaker.take(packet);
         }).start();
     }
 }
@@ -76,19 +102,12 @@ class Receiver {
         subscription = aeron.addSubscription("aeron:udp?endpoint=" + address, 0);
         new Thread(() -> {
             FragmentHandler fragmentHandler = (buffer, offset, length, header) -> {
-                long timeReceived = System.nanoTime();
-                byte[] bytes = new byte[length - (1 + 8 + 8)];
-                buffer.getBytes(offset + (1 + 8 + 8), bytes);
-                switch (buffer.getByte(offset)) {
-                    case Type.AUDIO: {
-                        speaker.take(bytes);
-                        break;
-                    }
-                    case Type.VIDEO: {
-                        window.take(header.streamId(), header.sessionId(), bytes);
-                        break;
-                    }
+                Packet packet = new Packet(buffer);
+                if (packet.getType() == Packet.TYPE_AUDIO) {
+                    speaker.take(packet);
+                    return;
                 }
+                window.take(packet);
             };
             FragmentAssembler fragmentAssembler = new FragmentAssembler(fragmentHandler);
             while (true) {
@@ -97,7 +116,7 @@ class Receiver {
             }
         }).start();
     }
-
+    
     private void reconnect() {
         subscription.close();
         subscription = aeron.addSubscription("aeron:udp?endpoint=" + address, 0);
@@ -109,29 +128,25 @@ class Receiver {
     }
 }
 
-class Sender {
+class Sender implements Subscriber {
     Publication publication;
 
     public Sender(Aeron aeron) {
         publication = aeron.addPublication("aeron:udp?control-mode=manual", 0);
     }
 
-    public void take(byte type, long timeProduction, byte[] bytes) {
-        UnsafeBuffer unsafeBuffer = new UnsafeBuffer(ByteBuffer.allocate(1 + 8 + 8 + bytes.length));
-        unsafeBuffer.putByte(0, type);
-        unsafeBuffer.putLong(1, timeProduction);
-        unsafeBuffer.putBytes(1 + 8 + 8, bytes);
-        unsafeBuffer.putLong(1 + 8, System.nanoTime());
-        long outcome = publication.offer(unsafeBuffer);
+    @Override
+    public void take(Packet packet) {
+        long outcome = publication.offer(packet.head, 0, packet.head.capacity(), packet.body, 0, packet.body.capacity());
         if (outcome < 0) System.out.print(outcome);
     }
-
+    
     public void addDestination(String address) {
         publication.addDestination("aeron:udp?endpoint=" + address);
     }
 }
 
-class Speaker {
+class Speaker implements Subscriber {
     SourceDataLine sourceDataLine;
 
     public Speaker(AudioFormat audioFormat) throws LineUnavailableException {
@@ -139,13 +154,16 @@ class Speaker {
         sourceDataLine.open(audioFormat);
         sourceDataLine.start();
     }
-
-    public void take(byte[] bytes) {
+    
+    @Override
+    public void take(Packet packet) {
+        byte[] bytes = new byte[packet.getBodyLength()];
+        packet.body.getBytes(0, bytes);
         sourceDataLine.write(bytes, 0, bytes.length);
     }
 }
 
-class Window {
+class Window implements Subscriber {
     JFrame jFrame = new JFrame();
     JLabel jLabel;
     long id;
@@ -157,16 +175,17 @@ class Window {
         jFrame.setVisible(true);
     }
 
-    public void take(int streamId, int sessionId, byte[] bytes) {
+    @Override
+    public void take(Packet packet) {
         BufferedImage bufferedImage = null;
         try {
-            bufferedImage = ImageIO.read(new ByteArrayInputStream(bytes));
+            bufferedImage = ImageIO.read(new DirectBufferInputStream(packet.body));
             if (bufferedImage == null) return;
         } catch (IOException exception) {
             exception.printStackTrace();
             return;
         }
-        id = ((long) streamId << 32) + (long) sessionId;
+        id = 0L; // ((long) streamId << 32) + (long) sessionId;
         if (!idToJLabel.containsKey(id)) {
             jLabel = new JLabel();
             jLabel.setIcon(new ImageIcon());
@@ -196,7 +215,7 @@ public class Client {
         Window window = new Window(dimension);
 
         Camera camera = new Camera(dimension, sender, window);
-        Microphone microphone = new Microphone(audioFormat, sender);
+        Microphone microphone = new Microphone(audioFormat, sender, speaker);
         Receiver receiver = new Receiver(aeron, address, speaker, window);
     }
 
