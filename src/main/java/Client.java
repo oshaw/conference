@@ -18,6 +18,8 @@ import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
 
 class Camera {
     public Camera(Dimension dimension, Sender sender, Window window) throws VideoCaptureException {
@@ -30,13 +32,13 @@ class Camera {
             );
             ImageUtilities.createBufferedImage(videoCapture.getNextFrame(), bufferedImage);
             ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
-            try { 
+            try {
                 ImageIO.write(bufferedImage, "png", byteArrayOutputStream);
             } catch (Exception exception) {
                 exception.printStackTrace();
             }
             sender.take(byteArrayOutputStream.toByteArray());
-            window.take(bufferedImage);
+            window.take(0, 0, bufferedImage);
         }).start();
     }
 }
@@ -76,7 +78,7 @@ class Receiver {
                     } catch (IOException exception) {
                         exception.printStackTrace();
                     }
-                    if (bufferedImage != null) window.take(bufferedImage);
+                    if (bufferedImage != null) window.take(header.streamId(), header.sessionId(), bufferedImage);
                 }
             };
             FragmentAssembler fragmentAssembler = new FragmentAssembler(fragmentHandler);
@@ -106,7 +108,8 @@ class Sender {
     }
     
     public void take(byte[] bytes) {
-        publication.offer(new UnsafeBuffer(bytes));
+        long outcome = publication.offer(new UnsafeBuffer(bytes));
+        if (outcome < 0) System.out.print(outcome);
     }
     
     public void addDestination(String address) {
@@ -130,19 +133,28 @@ class Speaker {
 
 class Window {
     JFrame jFrame = new JFrame();
-    JLabel jLabel = new JLabel();
-    ImageIcon imageIcon = new ImageIcon();
-    
+    JLabel jLabel;
+    long id;
+    Map<Long, JLabel> idToJLabel = new HashMap<>();
+
     public Window(Dimension dimension) {
-        jFrame.getContentPane().add(jLabel);
-        jFrame.setSize(dimension);
+        jFrame.setLayout(new GridLayout(1, 3));
+        jFrame.setSize((int) dimension.getWidth() * 3, (int) dimension.getHeight());
         jFrame.setVisible(true);
-        jLabel.setIcon(imageIcon);
     }
     
-    public void take(BufferedImage bufferedImage) {
-        imageIcon.setImage(bufferedImage);
-        jLabel.repaint();
+    public void take(int streamId, int sessionId, BufferedImage bufferedImage) {
+        id = (streamId << 32) + sessionId;
+        if (!idToJLabel.containsKey(id)) {
+            jLabel = new JLabel();
+            jLabel.setIcon(new ImageIcon());
+            jFrame.getContentPane().add(jLabel);
+            idToJLabel.put(id, jLabel);
+        }
+        jLabel = idToJLabel.get(id);
+        ((ImageIcon) jLabel.getIcon()).setImage(bufferedImage);
+        jFrame.revalidate();
+        jFrame.repaint();
     }
 }
 
