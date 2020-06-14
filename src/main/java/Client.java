@@ -4,7 +4,14 @@ import io.aeron.Publication;
 import io.aeron.Subscription;
 import io.aeron.driver.MediaDriver;
 import io.aeron.logbuffer.FragmentHandler;
+import org.agrona.MutableDirectBuffer;
+import org.agrona.collections.ObjectHashSet;
+import org.agrona.concurrent.AtomicBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
+import org.agrona.concurrent.broadcast.BroadcastBufferDescriptor;
+import org.agrona.concurrent.broadcast.BroadcastReceiver;
+import org.agrona.concurrent.broadcast.BroadcastTransmitter;
+import org.agrona.io.DirectBufferOutputStream;
 import org.openimaj.image.ImageUtilities;
 import org.openimaj.video.capture.VideoCapture;
 import org.openimaj.video.capture.VideoCaptureException;
@@ -16,31 +23,44 @@ import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.Map;
 
-class Camera {
+interface Publisher {
+    public AtomicBuffer atomicBuffer();
+}
+
+interface Subscriber {
+    public void subscribe(AtomicBuffer atomicBuffer);
+}
+
+class Camera implements Publisher {
+    UnsafeBuffer unsafeBuffer = new UnsafeBuffer(new byte[16 + BroadcastBufferDescriptor.TRAILER_LENGTH]);
+    
     public Camera(Dimension dimension, Sender sender, Window window) throws VideoCaptureException {
+        BroadcastTransmitter broadcastTransmitter = new BroadcastTransmitter(unsafeBuffer);
         VideoCapture videoCapture = new VideoCapture((int) dimension.getWidth(), (int) dimension.getHeight());
-        new Timer(1000 / 30, (ActionEvent actionEvent) -> {
+        new Timer(1000 / 20, (ActionEvent actionEvent) -> {
             BufferedImage bufferedImage = new BufferedImage(
                 (int) dimension.getWidth(),
                 (int) dimension.getHeight(),
-                BufferedImage.TYPE_INT_ARGB
-            );
+                BufferedImage.TYPE_INT_ARGB);
             ImageUtilities.createBufferedImage(videoCapture.getNextFrame(), bufferedImage);
-            ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+            DirectBufferOutputStream directBufferOutputStream = new DirectBufferOutputStream();
             try {
-                ImageIO.write(bufferedImage, "png", byteArrayOutputStream);
+                ImageIO.write(bufferedImage, "png", directBufferOutputStream);
             } catch (Exception exception) {
                 exception.printStackTrace();
             }
-            byte[] bytes = byteArrayOutputStream.toByteArray();
-            sender.take(bytes);
-            window.take(0, 0, bytes);
+            broadcastTransmitter.transmit(0, directBufferOutputStream.buffer(), 0, directBufferOutputStream.length());
         }).start();
+    }
+    
+    @Override
+    public AtomicBuffer atomicBuffer() {
+        return unsafeBuffer;
     }
 }
 
@@ -49,7 +69,7 @@ class Microphone {
         TargetDataLine targetDataLine = (TargetDataLine) AudioSystem.getLine(new DataLine.Info(TargetDataLine.class, audioFormat));
         targetDataLine.open(audioFormat);
         targetDataLine.start();
-        new Timer(1000 / 30, (ActionEvent actionEvent) -> {
+        new Timer(1000 / 20, (ActionEvent actionEvent) -> {
             byte[] bytes = new byte[1000];
             targetDataLine.read(bytes, 0, Math.min(targetDataLine.available(), bytes.length));
             sender.take(bytes);
@@ -123,7 +143,9 @@ class Speaker {
     }
 }
 
-class Window {
+class Window implements Subscriber {
+    ObjectHashSet<BroadcastReceiver> broadcastReceivers = new ObjectHashSet<>(2);
+    
     JFrame jFrame = new JFrame();
     JLabel jLabel;
     long id;
@@ -133,9 +155,26 @@ class Window {
         jFrame.setLayout(new GridLayout(1, 3));
         jFrame.setSize((int) dimension.getWidth() * 3, (int) dimension.getHeight());
         jFrame.setVisible(true);
+        new Thread(() -> {
+            BroadcastReceiver broadcastReceiver;
+            Iterator<BroadcastReceiver> iterator;
+            while (true) {
+                iterator = broadcastReceivers.iterator();
+                while (iterator.hasNext()) {
+                    broadcastReceiver = iterator.next();
+                    broadcastReceiver.receiveNext();
+                    take(broadcastReceiver);
+                }
+            }
+        }).start();
     }
     
-    public void take(int streamId, int sessionId, byte[] bytes) {
+    @Override
+    public void subscribe(AtomicBuffer atomicBuffer) {
+        broadcastReceivers.add(new BroadcastReceiver(atomicBuffer));
+    }
+    
+    private void take(BroadcastReceiver broadcastReceiver) {
         BufferedImage bufferedImage = null;
         try {
             bufferedImage = ImageIO.read(new ByteArrayInputStream(bytes));
