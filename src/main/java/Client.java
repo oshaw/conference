@@ -4,14 +4,7 @@ import io.aeron.Publication;
 import io.aeron.Subscription;
 import io.aeron.driver.MediaDriver;
 import io.aeron.logbuffer.FragmentHandler;
-import org.agrona.MutableDirectBuffer;
-import org.agrona.collections.ObjectHashSet;
-import org.agrona.concurrent.AtomicBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
-import org.agrona.concurrent.broadcast.BroadcastBufferDescriptor;
-import org.agrona.concurrent.broadcast.BroadcastReceiver;
-import org.agrona.concurrent.broadcast.BroadcastTransmitter;
-import org.agrona.io.DirectBufferOutputStream;
 import org.openimaj.image.ImageUtilities;
 import org.openimaj.video.capture.VideoCapture;
 import org.openimaj.video.capture.VideoCaptureException;
@@ -23,44 +16,38 @@ import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.Map;
 
-interface Publisher {
-    public AtomicBuffer atomicBuffer();
+class Type {
+    final public static byte AUDIO = 0;
+    final public static byte VIDEO = 1;
 }
 
-interface Subscriber {
-    public void subscribe(AtomicBuffer atomicBuffer);
-}
-
-class Camera implements Publisher {
-    UnsafeBuffer unsafeBuffer = new UnsafeBuffer(new byte[16 + BroadcastBufferDescriptor.TRAILER_LENGTH]);
-    
+class Camera {
     public Camera(Dimension dimension, Sender sender, Window window) throws VideoCaptureException {
-        BroadcastTransmitter broadcastTransmitter = new BroadcastTransmitter(unsafeBuffer);
         VideoCapture videoCapture = new VideoCapture((int) dimension.getWidth(), (int) dimension.getHeight());
-        new Timer(1000 / 20, (ActionEvent actionEvent) -> {
+        new Timer(1000 / 30, (ActionEvent actionEvent) -> {
+            long timeTriggered = System.nanoTime();
             BufferedImage bufferedImage = new BufferedImage(
                 (int) dimension.getWidth(),
                 (int) dimension.getHeight(),
-                BufferedImage.TYPE_INT_ARGB);
+                BufferedImage.TYPE_INT_ARGB
+            );
             ImageUtilities.createBufferedImage(videoCapture.getNextFrame(), bufferedImage);
-            DirectBufferOutputStream directBufferOutputStream = new DirectBufferOutputStream();
+            ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
             try {
-                ImageIO.write(bufferedImage, "png", directBufferOutputStream);
+                ImageIO.write(bufferedImage, "png", byteArrayOutputStream);
             } catch (Exception exception) {
                 exception.printStackTrace();
             }
-            broadcastTransmitter.transmit(0, directBufferOutputStream.buffer(), 0, directBufferOutputStream.length());
+            byte[] bytes = byteArrayOutputStream.toByteArray();
+            sender.take(Type.VIDEO, timeTriggered, bytes);
+            window.take(0, 0, bytes);
         }).start();
-    }
-    
-    @Override
-    public AtomicBuffer atomicBuffer() {
-        return unsafeBuffer;
     }
 }
 
@@ -69,10 +56,11 @@ class Microphone {
         TargetDataLine targetDataLine = (TargetDataLine) AudioSystem.getLine(new DataLine.Info(TargetDataLine.class, audioFormat));
         targetDataLine.open(audioFormat);
         targetDataLine.start();
-        new Timer(1000 / 20, (ActionEvent actionEvent) -> {
-            byte[] bytes = new byte[1000];
-            targetDataLine.read(bytes, 0, Math.min(targetDataLine.available(), bytes.length));
-            sender.take(bytes);
+        new Timer(1000 / 30, (ActionEvent actionEvent) -> {
+            long timeTriggered = System.nanoTime();
+            byte[] bytes = new byte[targetDataLine.available()];
+            targetDataLine.read(bytes, 0, bytes.length);
+            sender.take(Type.AUDIO, timeTriggered, bytes);
         }).start();
     }
 }
@@ -81,17 +69,26 @@ class Receiver {
     Aeron aeron;
     String address;
     Subscription subscription;
-    
+
     public Receiver(Aeron aeron, String address, Speaker speaker, Window window) {
         this.aeron = aeron;
         this.address = address;
         subscription = aeron.addSubscription("aeron:udp?endpoint=" + address, 0);
         new Thread(() -> {
             FragmentHandler fragmentHandler = (buffer, offset, length, header) -> {
-                byte[] bytes = new byte[length];
-                buffer.getBytes(offset, bytes);
-                if (length == 1000) speaker.take(bytes);
-                window.take(header.streamId(), header.sessionId(), bytes);
+                long timeReceived = System.nanoTime();
+                byte[] bytes = new byte[length - (1 + 8 + 8)];
+                buffer.getBytes(offset + (1 + 8 + 8), bytes);
+                switch (buffer.getByte(offset)) {
+                    case Type.AUDIO: {
+                        speaker.take(bytes);
+                        break;
+                    }
+                    case Type.VIDEO: {
+                        window.take(header.streamId(), header.sessionId(), bytes);
+                        break;
+                    }
+                }
             };
             FragmentAssembler fragmentAssembler = new FragmentAssembler(fragmentHandler);
             while (true) {
@@ -100,7 +97,7 @@ class Receiver {
             }
         }).start();
     }
-    
+
     private void reconnect() {
         subscription.close();
         subscription = aeron.addSubscription("aeron:udp?endpoint=" + address, 0);
@@ -114,16 +111,21 @@ class Receiver {
 
 class Sender {
     Publication publication;
-    
+
     public Sender(Aeron aeron) {
         publication = aeron.addPublication("aeron:udp?control-mode=manual", 0);
     }
-    
-    public void take(byte[] bytes) {
-        long outcome = publication.offer(new UnsafeBuffer(bytes));
+
+    public void take(byte type, long timeProduction, byte[] bytes) {
+        UnsafeBuffer unsafeBuffer = new UnsafeBuffer(ByteBuffer.allocate(1 + 8 + 8 + bytes.length));
+        unsafeBuffer.putByte(0, type);
+        unsafeBuffer.putLong(1, timeProduction);
+        unsafeBuffer.putBytes(1 + 8 + 8, bytes);
+        unsafeBuffer.putLong(1 + 8, System.nanoTime());
+        long outcome = publication.offer(unsafeBuffer);
         if (outcome < 0) System.out.print(outcome);
     }
-    
+
     public void addDestination(String address) {
         publication.addDestination("aeron:udp?endpoint=" + address);
     }
@@ -131,21 +133,19 @@ class Sender {
 
 class Speaker {
     SourceDataLine sourceDataLine;
-    
+
     public Speaker(AudioFormat audioFormat) throws LineUnavailableException {
         sourceDataLine = (SourceDataLine) AudioSystem.getLine(new DataLine.Info(SourceDataLine.class, audioFormat));
         sourceDataLine.open(audioFormat);
         sourceDataLine.start();
     }
-    
+
     public void take(byte[] bytes) {
         sourceDataLine.write(bytes, 0, bytes.length);
     }
 }
 
-class Window implements Subscriber {
-    ObjectHashSet<BroadcastReceiver> broadcastReceivers = new ObjectHashSet<>(2);
-    
+class Window {
     JFrame jFrame = new JFrame();
     JLabel jLabel;
     long id;
@@ -155,26 +155,9 @@ class Window implements Subscriber {
         jFrame.setLayout(new GridLayout(1, 3));
         jFrame.setSize((int) dimension.getWidth() * 3, (int) dimension.getHeight());
         jFrame.setVisible(true);
-        new Thread(() -> {
-            BroadcastReceiver broadcastReceiver;
-            Iterator<BroadcastReceiver> iterator;
-            while (true) {
-                iterator = broadcastReceivers.iterator();
-                while (iterator.hasNext()) {
-                    broadcastReceiver = iterator.next();
-                    broadcastReceiver.receiveNext();
-                    take(broadcastReceiver);
-                }
-            }
-        }).start();
     }
-    
-    @Override
-    public void subscribe(AtomicBuffer atomicBuffer) {
-        broadcastReceivers.add(new BroadcastReceiver(atomicBuffer));
-    }
-    
-    private void take(BroadcastReceiver broadcastReceiver) {
+
+    public void take(int streamId, int sessionId, byte[] bytes) {
         BufferedImage bufferedImage = null;
         try {
             bufferedImage = ImageIO.read(new ByteArrayInputStream(bytes));
@@ -183,7 +166,7 @@ class Window implements Subscriber {
             exception.printStackTrace();
             return;
         }
-        id = (streamId << 32) + sessionId;
+        id = ((long) streamId << 32) + (long) sessionId;
         if (!idToJLabel.containsKey(id)) {
             jLabel = new JLabel();
             jLabel.setIcon(new ImageIcon());
@@ -200,7 +183,7 @@ class Window implements Subscriber {
 public class Client {
     static MediaDriver mediaDriver = MediaDriver.launchEmbedded();
     Sender sender;
-    
+
     public Client(String address) throws LineUnavailableException, VideoCaptureException {
         Aeron.Context context = new Aeron.Context();
         context.aeronDirectoryName(mediaDriver.aeronDirectoryName());
@@ -216,11 +199,11 @@ public class Client {
         Microphone microphone = new Microphone(audioFormat, sender);
         Receiver receiver = new Receiver(aeron, address, speaker, window);
     }
-    
+
     public void addDestination(String address) {
         sender.addDestination(address);
     }
-    
+
     public static void main(String[] arguments) throws InterruptedException, LineUnavailableException, VideoCaptureException {
         String[] addresses = {"localhost:20000", "localhost:20001", "localhost:20002",};
         Client[] clients = {new Client(addresses[0]), new Client(addresses[1]), new Client(addresses[2]),};
