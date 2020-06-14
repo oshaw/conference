@@ -37,8 +37,9 @@ class Camera {
             } catch (Exception exception) {
                 exception.printStackTrace();
             }
-            sender.take(byteArrayOutputStream.toByteArray());
-            window.take(0, 0, bufferedImage);
+            byte[] bytes = byteArrayOutputStream.toByteArray();
+            sender.take(bytes);
+            window.take(0, 0, bytes);
         }).start();
     }
 }
@@ -69,17 +70,8 @@ class Receiver {
             FragmentHandler fragmentHandler = (buffer, offset, length, header) -> {
                 byte[] bytes = new byte[length];
                 buffer.getBytes(offset, bytes);
-                if (length == 1000) {
-                    speaker.take(bytes);
-                } else {
-                    BufferedImage bufferedImage = null;
-                    try {
-                        bufferedImage = ImageIO.read(new ByteArrayInputStream(bytes));
-                    } catch (IOException exception) {
-                        exception.printStackTrace();
-                    }
-                    if (bufferedImage != null) window.take(header.streamId(), header.sessionId(), bufferedImage);
-                }
+                if (length == 1000) speaker.take(bytes);
+                window.take(header.streamId(), header.sessionId(), bytes);
             };
             FragmentAssembler fragmentAssembler = new FragmentAssembler(fragmentHandler);
             while (true) {
@@ -143,7 +135,15 @@ class Window {
         jFrame.setVisible(true);
     }
     
-    public void take(int streamId, int sessionId, BufferedImage bufferedImage) {
+    public void take(int streamId, int sessionId, byte[] bytes) {
+        BufferedImage bufferedImage = null;
+        try {
+            bufferedImage = ImageIO.read(new ByteArrayInputStream(bytes));
+            if (bufferedImage == null) return;
+        } catch (IOException exception) {
+            exception.printStackTrace();
+            return;
+        }
         id = (streamId << 32) + sessionId;
         if (!idToJLabel.containsKey(id)) {
             jLabel = new JLabel();
