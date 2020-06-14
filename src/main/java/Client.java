@@ -29,19 +29,19 @@ class Packet {
     
     public UnsafeBuffer head;
     public UnsafeBuffer body;
-    boolean fromSingleBuffer;
+    int bodyLength;
     
     public Packet() {
         head = new UnsafeBuffer(new byte[SIZE_HEAD]);
         body = new UnsafeBuffer();
-        fromSingleBuffer = false;
+        bodyLength = -1;
     }
-    public Packet(DirectBuffer directBuffer) {
-        head = new UnsafeBuffer(directBuffer, 0, SIZE_HEAD);
-        body = new UnsafeBuffer(directBuffer, SIZE_HEAD, directBuffer.capacity() - SIZE_HEAD);
-        fromSingleBuffer = true;
+    public Packet(DirectBuffer directBuffer, int offset, int length) {
+        head = new UnsafeBuffer(directBuffer, offset, SIZE_HEAD);
+        body = new UnsafeBuffer(directBuffer, offset + SIZE_HEAD, length - SIZE_HEAD);
+        bodyLength = length - SIZE_HEAD;
     }
-    public int getBodyLength() { return fromSingleBuffer ? body.capacity() - SIZE_HEAD : body.capacity(); }
+    public int getBodyLength() { return (bodyLength != -1) ? bodyLength : body.capacity(); }
     public byte getType() { return head.getByte(0); }
     public void setType(byte type) { head.putByte(0, type); }
     // public void setTimeTriggered(long timeTriggered) { head.putLong(1, timeTriggered); }
@@ -85,8 +85,8 @@ class Microphone {
             packet.body.wrap(new byte[targetDataLine.available()]);
             targetDataLine.read(packet.body.byteArray(), 0, packet.body.capacity());
 
-//            sender.take(packet);
-            speaker.take(packet);
+            sender.take(packet);
+//            speaker.take(packet);
         }).start();
     }
 }
@@ -102,7 +102,7 @@ class Receiver {
         subscription = aeron.addSubscription("aeron:udp?endpoint=" + address, 0);
         new Thread(() -> {
             FragmentHandler fragmentHandler = (buffer, offset, length, header) -> {
-                Packet packet = new Packet(buffer);
+                Packet packet = new Packet(buffer, offset, length);
                 if (packet.getType() == Packet.TYPE_AUDIO) {
                     speaker.take(packet);
                     return;
