@@ -21,17 +21,26 @@ import java.awt.event.ActionEvent;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
-interface Factory<T> {
-    T create();
+//interface Factory<T> {
+//    T create();
+//}
+
+abstract class Task {
+    Packet packet;
+    
+    abstract void run();
+    
+    abstract class TaskFactory {
+        abstract Task create();
+    }
 }
 
-class RingBuffer<T> {
+class RingBuffer<T extends Task> {
     private final T[] array;
     private final AtomicInteger idNext = new AtomicInteger(1);
     private final int mask;
@@ -46,13 +55,13 @@ class RingBuffer<T> {
         this.size = size;
         for (int index = 0; index < size; index += 1) array[index] = factory.create();
     }
-    
-    public T commit() {
-        return array[producerIndex.incrementAndGet() & mask];
+
+    public T claim() {
+        return array[producerIndex.get() & mask];
     }
     
-    public T current() {
-        return array[producerIndex.get() & mask];
+    public void commit() {
+        producerIndex.incrementAndGet();
     }
     
     public int subscribe() {
@@ -66,38 +75,47 @@ class RingBuffer<T> {
         return array[subscriberTicketToIndex.get(ticket).getAndIncrement() & mask];
     }
     
-    public boolean valid(int id) {
-        return producerIndex.get() < subscriberTicketToIndex.get(id).get() - 1;
+    public boolean valid(int ticket) {
+        return producerIndex.get() < subscriberTicketToIndex.get(ticket).get() - 1;
     }
 }
 
 abstract class Publisher {
-    private final Set<Subscriber> subscribers = new ObjectHashSet<>();
-    public RingBuffer ringBuffer;
-    
-    public int addSubscriber(Subscriber subscriber) {
-        subscribers.add(subscriber);
-        return ringBuffer.subscribe();
-    }
-
-    protected void publish(Packet packet) {
-        Subscriber subscriber;
-        Iterator<Subscriber> iterator = subscribers.iterator();
-        while (iterator.hasNext()) {
-            subscriber = iterator.next();
-            if (subscriber.getPacketType() == Packet.TYPE_ALL || subscriber.getPacketType() == packet.getType()) subscriber.take(packet);
-        }
-    }
+    public RingBuffer<Task> ringBuffer;
 }
 
 abstract class Subscriber {
-    // private final Map<Integer, Publisher> publishers = new Int2ObjectHashMap<>();
+    
+    class PublisherTicketPair {
+        public Publisher publisher;
+        public int ticket;
+        
+        public PublisherTicketPair(Publisher publisher, int ticket) {
+            this.publisher = publisher;
+            this.ticket = ticket;
+        }
+    }
+    
+    private final Set<PublisherTicketPair> publisherTicketPairs = new ObjectHashSet<>();
     
     abstract byte getPacketType();
+    
     abstract void take(Packet packet);
+
+    public void run() {
+        new Thread(() -> {
+            while (true) {
+                Packet packet;
+                for (PublisherTicketPair publisherTicketPair : publisherTicketPairs) {
+                    packet = publisherTicketPair.publisher.ringBuffer.take(publisherTicketPair.ticket).packet;
+                    if (packet != null && (getPacketType() == Packet.TYPE_ALL || getPacketType() == packet.getType())) take(packet);
+                }
+            }
+        }).start();
+    }
     
     public void subscribe(Publisher publisher) {
-        int ticket = publisher.addSubscriber(this);
+        publisherTicketPairs.add(new PublisherTicketPair(publisher, publisher.ringBuffer.subscribe()));
     }
 }
 
@@ -134,24 +152,40 @@ class Packet {
 }
 
 class Camera extends Publisher {
+    private final Dimension dimension;
+    private final VideoCapture videoCapture;
+    
     public Camera(Dimension dimension) throws VideoCaptureException {
-        VideoCapture videoCapture = new VideoCapture((int) dimension.getWidth(), (int) dimension.getHeight());
+        this.dimension = dimension;
+        videoCapture = new VideoCapture((int) dimension.getWidth(), (int) dimension.getHeight());
+        
+        ringBuffer = new RingBuffer<>();
         new Timer(1000 / 30, (ActionEvent actionEvent) -> {
-            Packet packet = new Packet();
-            packet.setType(Packet.TYPE_VIDEO);
-            // packet.setTimeTriggered(actionEvent.getWhen());
-            
-            BufferedImage bufferedImage = new BufferedImage((int) dimension.getWidth(), (int) dimension.getHeight(), BufferedImage.TYPE_INT_ARGB);
-            ImageUtilities.createBufferedImage(videoCapture.getNextFrame(), bufferedImage);
-            ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
-            try { ImageIO.write(bufferedImage, "png", byteArrayOutputStream); }
-            catch (Exception exception) { exception.printStackTrace(); }
-            packet.body.wrap(byteArrayOutputStream.toByteArray());
-            
-            publish(packet);
+            ringBuffer.claim().run();
+            ringBuffer.commit();
         }).start();
     }
     
+    class TaskCamera extends Task {
+        BufferedImage bufferedImage = new BufferedImage((int) dimension.getWidth(), (int) dimension.getHeight(), BufferedImage.TYPE_INT_ARGB);
+        ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+        
+        TaskCamera() { packet.setType(Packet.TYPE_VIDEO); }
+        
+        @Override
+        void run() {
+            try {
+                ImageUtilities.createBufferedImage(videoCapture.getNextFrame(), bufferedImage);
+                ImageIO.write(bufferedImage, "png", byteArrayOutputStream);
+                packet.body.wrap(byteArrayOutputStream.toByteArray());
+            }
+            catch (IOException exception) {
+                exception.printStackTrace();
+            }
+        }
+        
+        
+    }
 }
 
 class Microphone extends Publisher {
