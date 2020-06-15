@@ -22,12 +22,62 @@ import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.Iterator;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+
+interface Factory<T> {
+    T create();
+}
+
+class RingBuffer<T> {
+    private final T[] array;
+    private final AtomicInteger idNext = new AtomicInteger(1);
+    private final int mask;
+    private final int size;
+    
+    private final AtomicInteger producerIndex = new AtomicInteger(0);
+    private final Map<Integer, AtomicInteger> subscriberTicketToIndex = new ConcurrentHashMap<>();
+    
+    public RingBuffer(Factory<T> factory, int size) {
+        array = (T[]) new Object[size];
+        mask = size - 1;
+        this.size = size;
+        for (int index = 0; index < size; index += 1) array[index] = factory.create();
+    }
+    
+    public T commit() {
+        return array[producerIndex.incrementAndGet() & mask];
+    }
+    
+    public T current() {
+        return array[producerIndex.get() & mask];
+    }
+    
+    public int subscribe() {
+        int id = idNext.getAndIncrement();
+        subscriberTicketToIndex.put(id, new AtomicInteger(Math.max(0, producerIndex.get() - size)));
+        return id;
+    }
+    
+    public T take(int ticket) {
+        if (subscriberTicketToIndex.get(ticket).get() == producerIndex.get()) return null;
+        return array[subscriberTicketToIndex.get(ticket).getAndIncrement() & mask];
+    }
+    
+    public boolean valid(int id) {
+        return producerIndex.get() < subscriberTicketToIndex.get(id).get() - 1;
+    }
+}
 
 abstract class Publisher {
-    private final ObjectHashSet<Subscriber> subscribers = new ObjectHashSet<>();
+    private final Set<Subscriber> subscribers = new ObjectHashSet<>();
+    public RingBuffer ringBuffer;
     
-    public void subscribe(Subscriber subscriber) {
+    public int addSubscriber(Subscriber subscriber) {
         subscribers.add(subscriber);
+        return ringBuffer.subscribe();
     }
 
     protected void publish(Packet packet) {
@@ -41,8 +91,14 @@ abstract class Publisher {
 }
 
 abstract class Subscriber {
+    // private final Map<Integer, Publisher> publishers = new Int2ObjectHashMap<>();
+    
     abstract byte getPacketType();
     abstract void take(Packet packet);
+    
+    public void subscribe(Publisher publisher) {
+        int ticket = publisher.addSubscriber(this);
+    }
 }
 
 class Packet {
@@ -255,11 +311,11 @@ public class Client {
         Microphone microphone = new Microphone(audioFormat);
         Receiver receiver = new Receiver(aeron, address);
         
-        camera.subscribe(sender);
-        camera.subscribe(window);
-        microphone.subscribe(sender);
-        receiver.subscribe(speaker);
-        receiver.subscribe(window);
+        sender.subscribe(camera);
+        sender.subscribe(microphone);
+        speaker.subscribe(receiver);
+        window.subscribe(camera);
+        window.subscribe(receiver);
     }
 
     public void addDestination(String address) {
