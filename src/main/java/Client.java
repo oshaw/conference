@@ -6,9 +6,7 @@ import io.aeron.driver.MediaDriver;
 import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.logbuffer.Header;
 import org.agrona.DirectBuffer;
-import org.agrona.collections.IntHashSet;
 import org.agrona.collections.Long2ObjectHashMap;
-import org.agrona.collections.ObjectHashSet;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.io.DirectBufferInputStream;
 import org.openimaj.image.ImageUtilities;
@@ -46,7 +44,7 @@ abstract class Publisher {
         private final int mask;
         private final int size;
 
-        private final AtomicInteger producerIndex = new AtomicInteger(0);
+        private final AtomicInteger publisherIndex = new AtomicInteger(0);
         private final Map<Integer, AtomicInteger> subscriberTicketToIndex = new ConcurrentHashMap<>();
         
         @SuppressWarnings("unchecked")
@@ -57,28 +55,28 @@ abstract class Publisher {
             for (int index = 0; index < size; index += 1) array[index] = factory.create();
         }
 
-        public void commit() {
-            while (producerIndex.get() == subscribersMinimumIndex() - size);
-            producerIndex.incrementAndGet();
+        public T claim() {
+            while (publisherIndex.get() == subscribersMinimumIndex() + size);
+            return array[publisherIndex.get() & mask];
         }
 
-        public T current() {
-            return array[producerIndex.get() & mask];
+        public void commit() {
+            publisherIndex.incrementAndGet();
         }
 
         public int subscribe() {
             int id = idNext.getAndIncrement();
-            subscriberTicketToIndex.put(id, new AtomicInteger(Math.max(0, producerIndex.get() - size)));
+            subscriberTicketToIndex.put(id, new AtomicInteger(Math.max(0, publisherIndex.get() - size)));
             return id;
         }
 
         public T take(int ticket) {
-            if (subscriberTicketToIndex.get(ticket).get() == producerIndex.get()) return null;
+            if (subscriberTicketToIndex.get(ticket).get() == publisherIndex.get()) return null;
             return array[subscriberTicketToIndex.get(ticket).getAndIncrement() & mask];
         }
 
         public boolean valid(int id) {
-            return producerIndex.get() < subscriberTicketToIndex.get(id).get() - 1;
+            return publisherIndex.get() < subscriberTicketToIndex.get(id).get() - 1;
         }
         
         private int subscribersMinimumIndex() {
@@ -90,7 +88,7 @@ abstract class Publisher {
 }
 
 abstract class Subscriber {
-    private final Set<Tuple<Publisher, Integer>> tuplesPublisherTicket = new ObjectHashSet<>();
+    private final Set<Tuple<Publisher, Integer>> tuplesPublisherTicket = ConcurrentHashMap.newKeySet();
 
     abstract byte packetType();
     
@@ -153,9 +151,6 @@ class Packet {
         
         body.wrap(directBuffer, offset + SIZE_HEAD, length - SIZE_HEAD);
         bodyLoadedLength = length - SIZE_HEAD;
-        if (type() == TYPE_AUDIO && (bodyLoadedLength % 2 == 1)) {
-            bodyLoadedLength = bodyLoadedLength;
-        }
     }
     
     public int bodyLength() { return (bodyLoadedLength != -1) ? bodyLoadedLength : body.capacity(); }
@@ -177,8 +172,8 @@ class Packet {
 class Camera extends Publisher {
     public Camera(Dimension dimension) throws VideoCaptureException {
         VideoCapture videoCapture = new VideoCapture((int) dimension.getWidth(), (int) dimension.getHeight());
-        new Timer(1000 / 30, (ActionEvent actionEvent) -> {
-            Packet packet = ringBuffer.current();
+        new Timer(1000, (ActionEvent actionEvent) -> {
+            Packet packet = ringBuffer.claim();
             packet.setType(Packet.TYPE_VIDEO);
             
             BufferedImage bufferedImage = new BufferedImage((int) dimension.getWidth(), (int) dimension.getHeight(), BufferedImage.TYPE_INT_ARGB);
@@ -199,8 +194,8 @@ class Microphone extends Publisher {
         TargetDataLine targetDataLine = (TargetDataLine) AudioSystem.getLine(new DataLine.Info(TargetDataLine.class, audioFormat));
         targetDataLine.open(audioFormat);
         targetDataLine.start();
-        new Timer(1000 / 30, (ActionEvent actionEvent) -> {
-            Packet packet = ringBuffer.current();
+        new Timer(1000, (ActionEvent actionEvent) -> {
+            Packet packet = ringBuffer.claim();
             packet.setType(Packet.TYPE_AUDIO);
             packet.body.wrap(new byte[targetDataLine.available()]);
             targetDataLine.read(packet.body.byteArray(), 0, packet.body.capacity());
@@ -210,10 +205,9 @@ class Microphone extends Publisher {
 }
 
 class Receiver extends Publisher {
-    private final Aeron aeron;
     private final String address;
+    private final Aeron aeron;
     private Subscription subscription;
-    private IntHashSet sessionIds = new IntHashSet();
 
     public Receiver(Aeron aeron, String address) {
         this.aeron = aeron;
@@ -221,9 +215,7 @@ class Receiver extends Publisher {
         subscription = aeron.addSubscription("aeron:udp?endpoint=" + address, 1);
         new Thread(() -> {
             FragmentHandler fragmentHandler = (buffer, offset, length, header) -> {
-                if (!sessionIds.contains(header.sessionId())) sessionIds.add(header.sessionId());
-                System.out.println(address + " has " + sessionIds.size() + " sessionIds and " + subscription.images().size() + " Images");
-                ringBuffer.current().load(buffer, offset, length, header);
+                ringBuffer.claim().load(buffer, offset, length, header);
                 ringBuffer.commit();
             };
             FragmentAssembler fragmentAssembler = new FragmentAssembler(fragmentHandler);
@@ -257,7 +249,7 @@ class Sender extends Subscriber {
 
     @Override public void take(Packet packet) {
         long outcome = publication.offer(packet.head, 0, packet.head.capacity(), packet.body, 0, packet.body.capacity());
-        // if (outcome < 0) System.out.println(outcome);
+//        if (outcome < 0) System.out.println(outcome);
     }
 
     public void addDestination(String address) {
@@ -291,8 +283,8 @@ class Window extends Subscriber {
     private final Long2ObjectHashMap<JLabel> idToJLabel = new Long2ObjectHashMap<>();
 
     public Window(Dimension dimension, String address) {
-        jFrame.setLayout(new GridLayout(1, 4));
-        jFrame.setSize((int) dimension.getWidth() * 4, (int) dimension.getHeight());
+        jFrame.setLayout(new GridLayout(1, 1));
+        jFrame.setSize((int) dimension.getWidth() * 3, (int) dimension.getHeight());
         jFrame.setTitle(address);
         jFrame.setVisible(true);
         start();
@@ -335,17 +327,17 @@ public class Client {
         Dimension dimension = new Dimension(320, 240);
 
         sender = new Sender(aeron);
-        Speaker speaker = new Speaker(audioFormat);
+//        Speaker speaker = new Speaker(audioFormat);
         Window window = new Window(dimension, address);
 
         Camera camera = new Camera(dimension);
-        Microphone microphone = new Microphone(audioFormat);
+//        Microphone microphone = new Microphone(audioFormat);
         Receiver receiver = new Receiver(aeron, address);
 
         sender.subscribe(camera);
-        // sender.subscribe(microphone);
-        // speaker.subscribe(receiver);
-        // window.subscribe(camera);
+//        sender.subscribe(microphone);
+//        speaker.subscribe(receiver);
+        window.subscribe(camera);
         window.subscribe(receiver);
     }
 
@@ -354,33 +346,17 @@ public class Client {
     }
 
     public static void main(String[] arguments) throws InterruptedException, LineUnavailableException, VideoCaptureException {
-        String[] addresses = {"localhost:20000", "localhost:20001", "localhost:20002", "localhost:20003", "localhost:20004",};
+        String[] addresses = {"localhost:20000", "localhost:20001", "localhost:20002",};
         Client[] clients = {
             new Client(addresses[0]),
             new Client(addresses[1]),
             new Client(addresses[2]),
-            new Client(addresses[3]),
-            new Client(addresses[4]),
         };
         clients[0].addDestination(addresses[1]);
         clients[0].addDestination(addresses[2]);
-        clients[0].addDestination(addresses[3]);
-        clients[0].addDestination(addresses[4]);
         clients[1].addDestination(addresses[0]);
         clients[1].addDestination(addresses[2]);
-        clients[1].addDestination(addresses[3]);
-        clients[1].addDestination(addresses[4]);
         clients[2].addDestination(addresses[0]);
         clients[2].addDestination(addresses[1]);
-        clients[2].addDestination(addresses[3]);
-        clients[2].addDestination(addresses[4]);
-        clients[3].addDestination(addresses[0]);
-        clients[3].addDestination(addresses[1]);
-        clients[3].addDestination(addresses[2]);
-        clients[3].addDestination(addresses[4]);
-        clients[4].addDestination(addresses[0]);
-        clients[4].addDestination(addresses[1]);
-        clients[4].addDestination(addresses[2]);
-        clients[4].addDestination(addresses[3]);
     }
 }
