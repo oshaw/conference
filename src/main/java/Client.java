@@ -5,6 +5,7 @@ import io.aeron.Subscription;
 import io.aeron.driver.MediaDriver;
 import io.aeron.logbuffer.FragmentHandler;
 import org.agrona.DirectBuffer;
+import org.agrona.collections.Long2ObjectHashMap;
 import org.agrona.collections.ObjectHashSet;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.io.DirectBufferInputStream;
@@ -20,9 +21,7 @@ import java.awt.event.ActionEvent;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.util.HashMap;
 import java.util.Iterator;
-import java.util.Map;
 
 abstract class Publisher {
     private final ObjectHashSet<Subscriber> subscribers = new ObjectHashSet<>();
@@ -47,7 +46,7 @@ abstract class Subscriber {
 }
 
 class Packet {
-    public static final byte SIZE_HEAD = 1;
+    public static final byte SIZE_HEAD = 1 + 8 + 8;
     public static final byte TYPE_ALL = 0;
     public static final byte TYPE_AUDIO = 1;
     public static final byte TYPE_VIDEO = 2;
@@ -60,6 +59,8 @@ class Packet {
         head = new UnsafeBuffer(new byte[SIZE_HEAD]);
         body = new UnsafeBuffer();
         bodyLength = -1;
+        setStreamId(0);
+        setSessionId(0);
     }
     public Packet(DirectBuffer directBuffer, int offset, int length) {
         head = new UnsafeBuffer(directBuffer, offset, SIZE_HEAD);
@@ -68,8 +69,12 @@ class Packet {
     }
     public int getBodyLength() { return (bodyLength != -1) ? bodyLength : body.capacity(); }
     public byte getType() { return head.getByte(0); }
+    public int getStreamId() { return head.getInt(1); }
+    public int getSessionId() { return head.getInt(1 + 4); }
+
     public void setType(byte type) { head.putByte(0, type); }
-    // public void setTimeTriggered(long timeTriggered) { head.putLong(1, timeTriggered); }
+    public void setStreamId(int streamId) { head.putInt(1, streamId); }
+    public void setSessionId(int sessionId) { head.putInt(1 + 4, sessionId); }
 }
 
 class Camera extends Publisher {
@@ -120,7 +125,10 @@ class Receiver extends Publisher {
         subscription = aeron.addSubscription("aeron:udp?endpoint=" + address, 0);
         new Thread(() -> {
             FragmentHandler fragmentHandler = (buffer, offset, length, header) -> {
-                publish(new Packet(buffer, offset, length));
+                Packet packet = new Packet(buffer, offset, length);
+                packet.setStreamId(header.streamId());
+                packet.setSessionId(header.sessionId());
+                publish(packet);
                 
             };
             FragmentAssembler fragmentAssembler = new FragmentAssembler(fragmentHandler);
@@ -191,8 +199,8 @@ class Window extends Subscriber {
     private final JFrame jFrame = new JFrame();
     private JLabel jLabel;
     private long id;
-    private final Map<Long, JLabel> idToJLabel = new HashMap<>();
-
+    private final Long2ObjectHashMap<JLabel> idToJLabel = new Long2ObjectHashMap<>();
+    
     public Window(Dimension dimension) {
         jFrame.setLayout(new GridLayout(1, 3));
         jFrame.setSize((int) dimension.getWidth() * 3, (int) dimension.getHeight());
@@ -214,7 +222,7 @@ class Window extends Subscriber {
             exception.printStackTrace();
             return;
         }
-        id = 0L; // ((long) streamId << 32) + (long) sessionId;
+        id = ((long) packet.getStreamId() << 32) + (long) packet.getSessionId();
         if (!idToJLabel.containsKey(id)) {
             jLabel = new JLabel();
             jLabel.setIcon(new ImageIcon());
