@@ -21,7 +21,6 @@ import java.awt.event.ActionEvent;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -48,41 +47,41 @@ abstract class Publisher {
         private final Map<Integer, AtomicInteger> subscriberTicketToIndex = new ConcurrentHashMap<>();
         
         @SuppressWarnings("unchecked")
-        public RingBuffer(Factory<T> factory, int size) {
+        protected RingBuffer(Factory<T> factory, int size) {
             array = (T[]) new Object[size];
             mask = size - 1;
             this.size = size;
             for (int index = 0; index < size; index += 1) array[index] = factory.create();
         }
 
-        public T claim() {
+        private int subscribersMinimumIndex() {
+            int index = Integer.MAX_VALUE;
+            for (AtomicInteger atomicInteger : subscriberTicketToIndex.values()) index = Math.min(index, atomicInteger.get());
+            return index;
+        }
+        
+        protected T claim() {
             while (publisherIndex.get() == subscribersMinimumIndex() + size);
             return array[publisherIndex.get() & mask];
         }
-
-        public void commit() {
+        
+        protected void commit() {
             publisherIndex.incrementAndGet();
+        }
+        
+        public T acquire(int ticket) {
+            if (subscriberTicketToIndex.get(ticket).get() == publisherIndex.get()) return null;
+            return array[subscriberTicketToIndex.get(ticket).get() & mask];
+        }
+        
+        public void release(int ticket) {
+            subscriberTicketToIndex.get(ticket).incrementAndGet();
         }
 
         public int subscribe() {
             int id = idNext.getAndIncrement();
             subscriberTicketToIndex.put(id, new AtomicInteger(Math.max(0, publisherIndex.get() - size)));
             return id;
-        }
-
-        public T take(int ticket) {
-            if (subscriberTicketToIndex.get(ticket).get() == publisherIndex.get()) return null;
-            return array[subscriberTicketToIndex.get(ticket).getAndIncrement() & mask];
-        }
-
-        public boolean valid(int id) {
-            return publisherIndex.get() < subscriberTicketToIndex.get(id).get() - 1;
-        }
-        
-        private int subscribersMinimumIndex() {
-            int index = Integer.MAX_VALUE;
-            for (AtomicInteger atomicInteger : subscriberTicketToIndex.values()) index = Math.min(index, atomicInteger.get());
-            return index;
         }
     }
 }
@@ -100,15 +99,18 @@ abstract class Subscriber {
 
     protected void start() {
         new Thread(() -> {
-            Iterator<Tuple<Publisher, Integer>> iterator;
             Packet packet;
-            Tuple<Publisher, Integer> tuple;
+            Publisher publisher;
+            int ticket;
             while (true) {
-                iterator = tuplesPublisherTicket.iterator();
-                while (iterator.hasNext()) {
-                    tuple = iterator.next();
-                    packet = tuple.first.ringBuffer.take(tuple.second);
-                    if (packet != null && (packetType() == Packet.TYPE_ALL || packetType() == packet.type())) take(packet);
+                for (Tuple<Publisher, Integer> tuple : tuplesPublisherTicket) {
+                    publisher = tuple.first;
+                    ticket = tuple.second;
+                    packet = publisher.ringBuffer.acquire(ticket);
+                    if (packet != null) {
+                        if (packetType() == Packet.TYPE_ALL || packetType() == packet.type()) take(packet);
+                        publisher.ringBuffer.release(ticket);
+                    }
                 }
             }
         }).start();
@@ -145,12 +147,13 @@ class Packet {
     }
     
     public void load(DirectBuffer directBuffer, int offset, int length, Header header) {
-        head.wrap(directBuffer, offset, SIZE_HEAD);
+        directBuffer.getBytes(offset, head, 0, SIZE_HEAD);
         setStreamId(header.streamId());
         setSessionId(header.sessionId());
-        
-        body.wrap(directBuffer, offset + SIZE_HEAD, length - SIZE_HEAD);
+
         bodyLoadedLength = length - SIZE_HEAD;
+        body = new UnsafeBuffer(new byte[bodyLoadedLength]);
+        directBuffer.getBytes(SIZE_HEAD, body, 0, bodyLoadedLength);
     }
     
     public int bodyLength() { return (bodyLoadedLength != -1) ? bodyLoadedLength : body.capacity(); }
@@ -218,7 +221,7 @@ class Receiver extends Publisher {
                 ringBuffer.claim().load(buffer, offset, length, header);
                 ringBuffer.commit();
             };
-            FragmentAssembler fragmentAssembler = new FragmentAssembler(fragmentHandler);
+            FragmentAssembler fragmentAssembler = new FragmentAssembler(fragmentHandler, 0, true);
             while (true) {
                 subscription.poll(fragmentAssembler, 100);
                 if (subscription.hasNoImages()) reconnect();
@@ -327,16 +330,16 @@ public class Client {
         Dimension dimension = new Dimension(320, 240);
 
         sender = new Sender(aeron);
-//        Speaker speaker = new Speaker(audioFormat);
+        Speaker speaker = new Speaker(audioFormat);
         Window window = new Window(dimension, address);
 
         Camera camera = new Camera(dimension);
-//        Microphone microphone = new Microphone(audioFormat);
+        Microphone microphone = new Microphone(audioFormat);
         Receiver receiver = new Receiver(aeron, address);
 
         sender.subscribe(camera);
-//        sender.subscribe(microphone);
-//        speaker.subscribe(receiver);
+        sender.subscribe(microphone);
+        speaker.subscribe(receiver);
         window.subscribe(camera);
         window.subscribe(receiver);
     }
