@@ -39,7 +39,7 @@ abstract class Publisher {
 
     static class RingBuffer<T> {
         private final T[] array;
-        private final AtomicInteger idNext = new AtomicInteger(0);
+        private final AtomicInteger ticketNext = new AtomicInteger(0);
         private final int mask;
         private final int size;
 
@@ -79,9 +79,9 @@ abstract class Publisher {
         }
 
         public int subscribe() {
-            int id = idNext.getAndIncrement();
-            subscriberTicketToIndex.put(id, new AtomicInteger(Math.max(0, publisherIndex.get() - size)));
-            return id;
+            int ticket = ticketNext.getAndIncrement();
+            subscriberTicketToIndex.put(ticket, new AtomicInteger(Math.max(0, publisherIndex.get() - size)));
+            return ticket;
         }
     }
 }
