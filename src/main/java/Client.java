@@ -5,9 +5,15 @@ import io.aeron.Subscription;
 import io.aeron.driver.MediaDriver;
 import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.logbuffer.Header;
+import org.agrona.BitUtil;
 import org.agrona.DirectBuffer;
 import org.agrona.collections.Long2ObjectHashMap;
+import org.agrona.concurrent.AtomicBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
+import org.agrona.concurrent.broadcast.BroadcastBufferDescriptor;
+import org.agrona.concurrent.broadcast.BroadcastReceiver;
+import org.agrona.concurrent.broadcast.BroadcastTransmitter;
+import org.agrona.concurrent.broadcast.RecordDescriptor;
 import org.agrona.io.DirectBufferInputStream;
 import org.openimaj.image.ImageUtilities;
 import org.openimaj.video.capture.VideoCapture;
@@ -21,10 +27,10 @@ import java.awt.event.ActionEvent;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.util.Map;
+import java.util.Collections;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 interface Factory<T> {
     T create();
@@ -74,100 +80,90 @@ class Packet {
     }
 }
 
-abstract class Publisher {
-    public RingBuffer<Packet> ringBuffer;
-
-    protected Publisher() {
-        ringBuffer = new RingBuffer<>(Packet.factoryPacket, 64);
+class BlockingBroadcastTransmitter extends BroadcastTransmitter {
+    private final AtomicBuffer buffer;
+    private final AtomicLong cursor;
+    private final AtomicLong ticketNext = new AtomicLong(0);
+    private final ConcurrentHashMap<Long, Long> receiverTicketToCursor = new ConcurrentHashMap<>();
+    
+    public BlockingBroadcastTransmitter(AtomicBuffer buffer) {
+        super(buffer);
+        this.buffer = buffer;
+        cursor = new AtomicLong(calculateCursor());
     }
-
-    static class RingBuffer<T> {
-        private final T[] array;
-        private final AtomicInteger ticketNext = new AtomicInteger(0);
-        private final int mask;
-        private final int size;
-
-        private final AtomicInteger publisherIndex = new AtomicInteger(0);
-        private final Map<Integer, AtomicInteger> subscriberTicketToIndex = new ConcurrentHashMap<>();
-
-        @SuppressWarnings("unchecked")
-        protected RingBuffer(Factory<T> factory, int size) {
-            array = (T[]) new Object[size];
-            mask = size - 1;
-            this.size = size;
-            for (int index = 0; index < size; index += 1) array[index] = factory.create();
-        }
-
-        private int subscribersMinimumIndex() {
-            int index = Integer.MAX_VALUE;
-            for (AtomicInteger atomicInteger : subscriberTicketToIndex.values()) index = Math.min(index, atomicInteger.get());
-            return index;
-        }
-
-        protected T claim() {
-            while (publisherIndex.get() == subscribersMinimumIndex() + size);
-            return array[publisherIndex.get() & mask];
-        }
-
-        protected void commit() {
-            publisherIndex.incrementAndGet();
-        }
-
-        public T acquire(int ticket) {
-            if (subscriberTicketToIndex.get(ticket).get() == publisherIndex.get()) return null;
-            return array[subscriberTicketToIndex.get(ticket).get() & mask];
-        }
-
-        public void release(int ticket) {
-            subscriberTicketToIndex.get(ticket).incrementAndGet();
-        }
-
-        public int subscribe() {
-            int ticket = ticketNext.getAndIncrement();
-            subscriberTicketToIndex.put(ticket, new AtomicInteger(Math.max(0, publisherIndex.get() - size)));
-            return ticket;
-        }
+    
+    public long addSubscriber() {
+        final long ticket = ticketNext.getAndIncrement();
+        receiverTicketToCursor.put(ticket, cursor.get());
+        return ticket;
+    }
+    
+    public AtomicBuffer buffer() { return buffer; }
+    
+    public void reportReceiveNext(long ticket) {
+        receiverTicketToCursor.put(ticket, calculateNextCursor(receiverTicketToCursor.get(ticket)));
+    }
+    
+    @Override public void transmit(int messageTypeId, DirectBuffer sourceBuffer, int sourceIndex, int length) {
+        while (cursor.get() + length + 8 >= minimumReceiverCursor() + capacity());
+        super.transmit(messageTypeId, sourceBuffer, sourceIndex, length);
+        cursor.set(calculateCursor());
+    }
+    
+    private long calculateCursor() {
+        return buffer.getLongVolatile(capacity() + BroadcastBufferDescriptor.LATEST_COUNTER_OFFSET);
+    }
+    
+    private long calculateNextCursor(long cursor) {
+        return (long) BitUtil.align(buffer.getInt(RecordDescriptor.lengthOffset((int) cursor & capacity() - 1)), 8);
+    }
+    
+    private long minimumReceiverCursor() {
+        return Collections.min(receiverTicketToCursor.values());
     }
 }
 
+class BlockingBroadcastReceiver extends BroadcastReceiver {
+    private final BlockingBroadcastTransmitter transmitter;
+    private final long ticket;
+    
+    public BlockingBroadcastReceiver(BlockingBroadcastTransmitter transmitter) {
+        super(transmitter.buffer());
+        this.transmitter = transmitter;
+        ticket = transmitter.addSubscriber();
+    }
+
+    @Override
+    public boolean receiveNext() {
+        boolean available = super.receiveNext();
+        if (available) transmitter.reportReceiveNext(ticket);
+        return available;
+    }
+}
+
+abstract class Publisher {
+    public final BlockingBroadcastTransmitter transmitter = new BlockingBroadcastTransmitter(new UnsafeBuffer());
+}
+
 abstract class Subscriber {
-    private final Set<Tuple<Publisher, Integer>> tuplesPublisherTicket = ConcurrentHashMap.newKeySet();
+    private final Set<BlockingBroadcastReceiver> receivers = ConcurrentHashMap.newKeySet();
 
     abstract byte packetType();
 
     abstract void take(Packet packet);
 
     public void subscribe(Publisher publisher) {
-        tuplesPublisherTicket.add(new Tuple<>(publisher, publisher.ringBuffer.subscribe()));
+        receivers.add(new BlockingBroadcastReceiver(publisher.transmitter));
     }
 
     protected void start() {
         new Thread(() -> {
-            Packet packet;
-            Publisher publisher;
-            int ticket;
             while (true) {
-                for (Tuple<Publisher, Integer> tuple : tuplesPublisherTicket) {
-                    publisher = tuple.first;
-                    ticket = tuple.second;
-                    packet = publisher.ringBuffer.acquire(ticket);
-                    if (packet != null) {
-                        if (packetType() == Packet.TYPE_ALL || packetType() == packet.type()) take(packet);
-                        publisher.ringBuffer.release(ticket);
-                    }
+                for (BlockingBroadcastReceiver receiver : receivers) {
+                    if (receiver.receiveNext()) take(receiver.buffer(), receiver.offset(), receiver.length());
                 }
             }
         }).start();
-    }
-
-    static class Tuple<A, B> {
-        A first;
-        B second;
-
-        public Tuple(A a, B b) {
-            first = a;
-            second = b;
-        }
     }
 }
 
@@ -204,26 +200,9 @@ class Microphone extends Publisher {
         targetDataLine.open(audioFormat);
         targetDataLine.start();
         new Timer(1000 / 30, (ActionEvent actionEvent) -> {
-            Packet packet = ringBuffer.claim();
-            packet.setType(Packet.TYPE_AUDIO);
-            packet.body.wrap(new byte[targetDataLine.available()]);
-            targetDataLine.read(packet.body.byteArray(), 0, packet.body.capacity());
-
-//            while (true) {
-//                SourceDataLine sourceDataLine = null;
-//                try {
-//                    sourceDataLine = (SourceDataLine) AudioSystem.getLine(new DataLine.Info(SourceDataLine.class, audioFormat));
-//                    sourceDataLine.open(audioFormat);
-//                } catch (LineUnavailableException exception) { exception.printStackTrace(); }
-//                sourceDataLine.start();
-//                byte[] bytes = new byte[targetDataLine.available() + 1];
-//                targetDataLine.read(bytes, 0, bytes.length - 1);
-//                try { Thread.sleep(1000); }
-//                catch (InterruptedException exception) {}
-//                sourceDataLine.write(bytes, 0, bytes.length - 1);
-//            }
-            
-            ringBuffer.commit();
+            byte[] bytes = new byte[targetDataLine.available() + 1];
+            targetDataLine.read(bytes, 0, bytes.length - 1);
+            transmitter.transmit(1, new UnsafeBuffer(bytes), 0, bytes.length);
         }).start();
     }
 }
