@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<sbe:messageSchema
+        id="1"
+        package="schema"
+        xmlns:sbe="http://fixprotocol.io/2016/sbe"
+        version="1">
+    <types>
+        <composite name="messageHeader">
+            <type name="blockLength" primitiveType="uint16"/>
+            <type name="templateId" primitiveType="uint16"/>
+            <type name="schemaId" primitiveType="uint16"/>
+            <type name="version" primitiveType="uint16"/>
+        </composite>
+    </types>
+    <sbe:message name="Metadata" id="1">
+        <field id="1" type="int8" name="flags"/>
+        <field id="2" type="uint32" name="address"/>
+        <field id="3" type="uint16" name="port"/>
+        <field id="4" type="uint64" name="time"/>
+        <field id="5" type="int8" name="padding"/>
+    </sbe:message>
+</sbe:messageSchema>
