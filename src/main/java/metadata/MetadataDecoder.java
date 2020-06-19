@@ -94,27 +94,27 @@ class MetadataDecoder
         this.limit = limit;
     }
 
-    public static int flagsId()
+    public static int datatypeId()
     {
         return 1;
     }
 
-    public static int flagsSinceVersion()
+    public static int datatypeSinceVersion()
     {
         return 0;
     }
 
-    public static int flagsEncodingOffset()
+    public static int datatypeEncodingOffset()
     {
         return 0;
     }
 
-    public static int flagsEncodingLength()
+    public static int datatypeEncodingLength()
     {
         return 1;
     }
 
-    public static String flagsMetaAttribute(final MetaAttribute metaAttribute)
+    public static String datatypeMetaAttribute(final MetaAttribute metaAttribute)
     {
         if (MetaAttribute.PRESENCE == metaAttribute)
         {
@@ -124,22 +124,22 @@ class MetadataDecoder
         return "";
     }
 
-    public static byte flagsNullValue()
+    public static byte datatypeNullValue()
     {
         return (byte)-128;
     }
 
-    public static byte flagsMinValue()
+    public static byte datatypeMinValue()
     {
         return (byte)-127;
     }
 
-    public static byte flagsMaxValue()
+    public static byte datatypeMaxValue()
     {
         return (byte)127;
     }
 
-    public byte flags()
+    public byte datatype()
     {
         return buffer.getByte(offset + 0);
     }
@@ -371,7 +371,7 @@ class MetadataDecoder
 
         final int originalLimit = limit();
         limit(initialOffset + actingBlockLength);
-        builder.append("[Metadata](sbeTemplateId=");
+        builder.append("[Decoder](sbeTemplateId=");
         builder.append(TEMPLATE_ID);
         builder.append("|sbeSchemaId=");
         builder.append(SCHEMA_ID);
@@ -390,8 +390,8 @@ class MetadataDecoder
         }
         builder.append(BLOCK_LENGTH);
         builder.append("):");
-        builder.append("flags=");
-        builder.append(flags());
+        builder.append("datatype=");
+        builder.append(datatype());
         builder.append('|');
         builder.append("address=");
         builder.append(address());

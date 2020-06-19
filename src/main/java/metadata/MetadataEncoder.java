@@ -99,27 +99,27 @@ class MetadataEncoder
         this.limit = limit;
     }
 
-    public static int flagsId()
+    public static int datatypeId()
     {
         return 1;
     }
 
-    public static int flagsSinceVersion()
+    public static int datatypeSinceVersion()
     {
         return 0;
     }
 
-    public static int flagsEncodingOffset()
+    public static int datatypeEncodingOffset()
     {
         return 0;
     }
 
-    public static int flagsEncodingLength()
+    public static int datatypeEncodingLength()
     {
         return 1;
     }
 
-    public static String flagsMetaAttribute(final MetaAttribute metaAttribute)
+    public static String datatypeMetaAttribute(final MetaAttribute metaAttribute)
     {
         if (MetaAttribute.PRESENCE == metaAttribute)
         {
@@ -129,22 +129,22 @@ class MetadataEncoder
         return "";
     }
 
-    public static byte flagsNullValue()
+    public static byte datatypeNullValue()
     {
         return (byte)-128;
     }
 
-    public static byte flagsMinValue()
+    public static byte datatypeMinValue()
     {
         return (byte)-127;
     }
 
-    public static byte flagsMaxValue()
+    public static byte datatypeMaxValue()
     {
         return (byte)127;
     }
 
-    public MetadataEncoder flags(final byte value)
+    public MetadataEncoder datatype(final byte value)
     {
         buffer.putByte(offset + 0, value);
         return this;

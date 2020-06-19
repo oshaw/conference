@@ -2,25 +2,28 @@ package metadata;
 
 import org.agrona.MutableDirectBuffer;
 
-public class Metadata {
-    public Metadata(final MutableDirectBuffer buffer, final int offset) {
+public class Metadata extends MetadataDecoder {
+    public static final byte TYPE_ALL = -1;
+    public static final byte TYPE_AUDIO = 0;
+    public static final byte TYPE_VIDEO = 1;
+
+    public void decode(final MutableDirectBuffer buffer, final int offset) {
         final MessageHeaderDecoder headerDecoder = new MessageHeaderDecoder();
-        final MetadataDecoder decoder = new MetadataDecoder();
         final int blockLength;
         final int version;
-
+        
         headerDecoder.wrap(buffer, offset);
         blockLength = headerDecoder.blockLength();
         headerDecoder.templateId();
         headerDecoder.schemaId();
         version = headerDecoder.version();
-        decoder.wrap(buffer, headerDecoder.offset(), blockLength, version);
+        super.wrap(buffer, headerDecoder.offset(), blockLength, version);
     }
     
     public static void encode(
         final MutableDirectBuffer buffer,
         final int offset,
-        final byte type,
+        final byte datatype,
         final int address,
         final short port,
         final long time
@@ -37,7 +40,7 @@ public class Metadata {
         
         encoder
             .wrap(buffer, offset + headerEncoder.offset())
-            .flags((byte) 0b10101010)
+            .datatype(datatype)
             .address(address)
             .port(port)
             .time(time)

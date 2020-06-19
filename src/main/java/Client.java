@@ -4,6 +4,8 @@ import io.aeron.Publication;
 import io.aeron.Subscription;
 import io.aeron.driver.MediaDriver;
 import io.aeron.logbuffer.FragmentHandler;
+import metadata.Metadata;
+import metadata.Metadata;
 import org.agrona.BitUtil;
 import org.agrona.DirectBuffer;
 import org.agrona.collections.Long2ObjectHashMap;
@@ -30,36 +32,6 @@ import java.util.Collections;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
-
-class Metadata {
-    public static final byte SIZE = 8;
-    public static final byte TYPE_ALL = -1;
-    public static final byte TYPE_AUDIO = 0;
-    public static final byte TYPE_VIDEO = 1;
-    public static final byte ORIGIN_LOCAL = 0;
-    public static final byte ORIGIN_FOREIGN = 1;
-
-    private static final long MASK_TYPE = (long) 1 << (SIZE * 8 - 1);
-    private static final long MASK_ORIGIN = (long) 1 << (SIZE * 8) - 1;
-    private static final long MASK_SESSION_ID = (long) Integer.MAX_VALUE << (SIZE * 8) - 3;
-    
-    public static void setType(UnsafeBuffer buffer, byte type) {
-        byte metadata = buffer.getByte(buffer.capacity() - 1);
-        if (type == TYPE_AUDIO) {
-            buffer.putByte(buffer.capacity() - 1, (byte) (metadata & ~MASK_TYPE));
-            return;
-        }
-        buffer.putByte(buffer.capacity() - 1, (byte) (metadata | MASK_TYPE));
-    }
-    
-    public static void setOrigin(UnsafeBuffer buffer, byte origin) {
-        
-    }
-
-    public static byte type(DirectBuffer buffer) {
-        return (byte) (buffer.getByte(buffer.capacity() - 1) & MASK_TYPE >> 7);
-    }
-}
 
 class BlockingBroadcastTransmitter extends BroadcastTransmitter {
     private final AtomicBuffer buffer;
@@ -173,7 +145,8 @@ abstract class Consumer {
     
     private void run() {
         for (BlockingBroadcastReceiver receiver : receivers) {
-            if (receiver.receiveNext() && (type == Metadata.TYPE_ALL || Metadata.type(receiver.buffer()) == type)) {
+            if (receiver.receiveNext()) {
+                Metadata.
                 consume(receiver.buffer(), receiver.offset(), receiver.length());
             }
         }
@@ -231,8 +204,7 @@ class Microphone extends Producer {
     @Override protected void produce() {
         final UnsafeBuffer buffer = new UnsafeBuffer(new byte[targetDataLine.available() + 1]);
         targetDataLine.read(buffer.byteArray(), 0, buffer.capacity() - 1);
-        Metadata.setType(buffer, type);
-        Metadata.setOrigin(buffer, Metadata.ORIGIN_LOCAL);
+        metadata.Encoder.encode(buffer, buffer.capacity())
         transmitter.transmit(0, buffer, 0, buffer.capacity());
     }
 }
