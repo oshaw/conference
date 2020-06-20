@@ -10,8 +10,10 @@ import org.agrona.collections.Long2ObjectHashMap;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.io.DirectBufferInputStream;
 import org.openimaj.image.ImageUtilities;
+import org.openimaj.image.MBFImage;
 import org.openimaj.video.capture.VideoCapture;
 import org.openimaj.video.capture.VideoCaptureException;
+import sun.misc.Unsafe;
 
 import javax.imageio.ImageIO;
 import javax.sound.sampled.*;
@@ -19,11 +21,14 @@ import javax.swing.*;
 import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 
@@ -381,13 +386,101 @@ public class Client {
     }
 
     public static void main(final String[] arguments) throws InterruptedException, LineUnavailableException, VideoCaptureException {
-        final String[] addressPorts = {"127.0.0.1:20000", "127.0.0.1:20001", "127.0.0.1:20002",};
-        final Client[] clients = {new Client(addressPorts[0]), new Client(addressPorts[1]), new Client(addressPorts[2]),};
-        clients[0].addDestination(addressPorts[1]);
-        clients[0].addDestination(addressPorts[2]);
-        clients[1].addDestination(addressPorts[0]);
-        clients[1].addDestination(addressPorts[2]);
-        clients[2].addDestination(addressPorts[0]);
-        clients[2].addDestination(addressPorts[1]);
+//        final String[] addressPorts = {"127.0.0.1:20000", "127.0.0.1:20001", "127.0.0.1:20002",};
+//        final Client[] clients = {new Client(addressPorts[0]), new Client(addressPorts[1]), new Client(addressPorts[2]),};
+//        clients[0].addDestination(addressPorts[1]);
+//        clients[0].addDestination(addressPorts[2]);
+//        clients[1].addDestination(addressPorts[0]);
+//        clients[1].addDestination(addressPorts[2]);
+//        clients[2].addDestination(addressPorts[0]);
+//        clients[2].addDestination(addressPorts[1]);
+        
+        final Dimension dimension = new Dimension(320, 240);
+        final Unsafe unsafe = unsafe();
+        final VideoCapture videoCapture = new VideoCapture((int) dimension.getWidth(), (int) dimension.getHeight());
+        
+        int failuresSafe = 0;
+        int failuresUnsafe = 0;
+        long timeSafe = 0L;
+        long timeUnsafe = 0L;
+
+        boolean success;
+        long timeStart;
+        long timeEnd;
+        MBFImage mbfImage;
+        for (int iteration = 0; iteration < 100; iteration += 1) {
+            mbfImage = videoCapture.getNextFrame();
+            UnsafeBuffer buffer = new UnsafeBuffer();
+            
+            BufferedImage bufferedImage = new BufferedImage(320, 240, BufferedImage.TYPE_INT_ARGB);
+            ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+            timeStart = System.nanoTime();
+            success = convertSafe(bufferedImage, byteArrayOutputStream, mbfImage, buffer);
+            timeEnd = System.nanoTime();
+            timeSafe += timeEnd - timeStart;
+            if (!success) failuresSafe += 1;
+            
+            timeStart = System.nanoTime();
+            success = convertUnsafeAllocation(bufferedImage, mbfImage, unsafe, buffer);
+            timeEnd = System.nanoTime();
+            timeUnsafe += timeEnd - timeStart;
+            if (!success) failuresUnsafe += 1;
+        }
+        
+        System.out.println("Safe:   " + timeSafe + "ns " + failuresSafe);
+        System.out.println("Unsafe:  " + timeUnsafe + "ns " + failuresUnsafe);
+        System.out.println("Saves:  " + (timeSafe - timeUnsafe) + "ns");
+    }
+    
+    static boolean convertUnsafe(BufferedImage bufferedImage, MBFImage mbfImage, Unsafe unsafe, UnsafeBuffer buffer) {
+        final int[] ints = mbfImage.toPackedARGBPixels();
+        final byte[] bytes = new byte[ints.length * 4];
+        for (int index = 0; index < bytes.length; index += 1) { bytes[index] = unsafe.getByte(ints, index + 16); }
+        buffer.wrap(bytes);
+        
+        byte[] bytesNew = buffer.byteArray();
+        final int[] intsNew = new int[ints.length];
+        for (int index = 0; index < intsNew.length; index += 1) { intsNew[index] = unsafe.getInt(bytesNew, (index * 4) + 16); }
+        bufferedImage.setRGB(0, 0, 320, 240, intsNew, 0, 320);
+        return bufferedImage != null;
+    }
+
+    static boolean convertUnsafeAllocation(BufferedImage bufferedImage, MBFImage mbfImage, Unsafe unsafe, UnsafeBuffer buffer) {
+        final int[] ints = mbfImage.toPackedARGBPixels();
+        final long address = unsafe.allocateMemory(ints.length * 4);
+        unsafe.copyMemory(ints, 16, null, address, ints.length * 4);
+        buffer.wrap(address, ints.length * 4);
+        
+        final int[] intsNew = new int[ints.length * 4];
+        unsafe.copyMemory(null, buffer.addressOffset(), intsNew, 16, ints.length * 4);
+        bufferedImage.setRGB(0, 0, 320, 240, intsNew, 0, 320);
+        unsafe.freeMemory(address);
+        return bufferedImage != null;
+    }
+    
+    static boolean convertSafe(
+        BufferedImage bufferedImageOriginal,
+        ByteArrayOutputStream byteArrayOutputStream,
+        MBFImage mbfImage,
+        UnsafeBuffer buffer
+    ) {
+        ImageUtilities.createBufferedImage(mbfImage, bufferedImageOriginal);
+        try { ImageIO.write(bufferedImageOriginal, "png", byteArrayOutputStream); }
+        catch (Exception exception) { return false; }
+        byteArrayOutputStream.write(0);
+        buffer.wrap(byteArrayOutputStream.toByteArray());
+        
+        final BufferedImage bufferedImage;
+        try { bufferedImage = ImageIO.read(new DirectBufferInputStream(buffer)); }
+        catch (IOException exception) { return false; }
+        return bufferedImage != null;
+    }
+    
+    static Unsafe unsafe() {
+        try {
+            final Field field = Unsafe.class.getDeclaredField("theUnsafe");
+            field.setAccessible(true);
+            return (Unsafe) field.get(null);
+        } catch (Exception exception) { return null; }
     }
 }
