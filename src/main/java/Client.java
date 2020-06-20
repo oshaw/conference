@@ -21,11 +21,13 @@ import java.awt.event.ActionEvent;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 
-import static org.agrona.concurrent.broadcast.BroadcastBufferDescriptor.TRAILER_LENGTH;
+abstract class Factory<T> { abstract T create(); }
 
 class Address {
     public static int stringToHost(final String address) {
@@ -47,25 +49,75 @@ class Metadata {
     public static final byte TYPE_AUDIO = 0;
     public static final byte TYPE_VIDEO = 1;
     
-    public static byte type(DirectBuffer buffer, int offset, int length) { return buffer.getByte(offset + length - SIZE); }
-    public static int host(DirectBuffer buffer, int offset, int length) { return buffer.getInt(offset + length - SIZE + 1); }
-    public static short port(DirectBuffer buffer, int offset, int length) { return buffer.getShort(offset + length - SIZE + 1 + 4); }
-    public static long time(DirectBuffer buffer, int offset, int length) { return buffer.getLong(offset + length - SIZE + 1 + 4 + 2); }
+    public static byte type(final DirectBuffer buffer) { return buffer.getByte(buffer.capacity() - SIZE); }
+    public static int host(final DirectBuffer buffer) { return buffer.getInt(buffer.capacity() - SIZE + 1); }
+    public static short port(final DirectBuffer buffer) { return buffer.getShort(buffer.capacity() - SIZE + 1 + 4); }
+    public static long time(final DirectBuffer buffer) { return buffer.getLong(buffer.capacity() - SIZE + 1 + 4 + 2); }
     
-    public static void setType(MutableDirectBuffer buffer, int length, byte type) { buffer.putByte(length - SIZE, type); }
-    public static void setHost(MutableDirectBuffer buffer, int length, int address) { buffer.putInt(length - SIZE + 1, address); }
-    public static void setPort(MutableDirectBuffer buffer, int length, short port) { buffer.putShort(length - SIZE + 1 + 4, port); }
-    public static void setTime(MutableDirectBuffer buffer, int length, long time) { buffer.putLong(length - SIZE + 1 + 4 + 2, time); }
+    public static void setType(final MutableDirectBuffer buffer, final byte type) { buffer.putByte(buffer.capacity() - SIZE, type); }
+    public static void setHost(final MutableDirectBuffer buffer, final int address) { buffer.putInt(buffer.capacity() - SIZE + 1, address); }
+    public static void setPort(final MutableDirectBuffer buffer, final short port) { buffer.putShort(buffer.capacity() - SIZE + 1 + 4, port); }
+    public static void setTime(final MutableDirectBuffer buffer, final long time) { buffer.putLong(buffer.capacity() - SIZE + 1 + 4 + 2, time); }
+}
+
+class Tuple<A, B> { A first; B second; public Tuple(A a, B b) { first = a; second = b; }}
+
+class RingBuffer<T> {
+    private final T[] array;
+    private final AtomicInteger ticketNext = new AtomicInteger(0);
+    private final int mask;
+    private final int size;
+
+    private final AtomicInteger producerIndex = new AtomicInteger(0);
+    private final Map<Integer, AtomicInteger> consumerTicketToIndex = new ConcurrentHashMap<>();
+
+    @SuppressWarnings("unchecked")
+    protected RingBuffer(final Factory<T> factory, final int size) {
+        array = (T[]) new Object[size];
+        mask = size - 1;
+        this.size = size;
+        for (int index = 0; index < size; index += 1) array[index] = factory.create();
+    }
+
+    private int consumersMinimumIndex() {
+        int index = Integer.MAX_VALUE;
+        for (AtomicInteger atomicInteger : consumerTicketToIndex.values()) index = Math.min(index, atomicInteger.get());
+        return index;
+    }
+
+    public T claim() {
+        while (producerIndex.get() == consumersMinimumIndex() + size);
+        return array[producerIndex.get() & mask];
+    }
+
+    public void commit() {
+        producerIndex.incrementAndGet();
+    }
+
+    public T acquire(final int ticket) {
+        if (consumerTicketToIndex.get(ticket).get() == producerIndex.get()) return null;
+        return array[consumerTicketToIndex.get(ticket).get() & mask];
+    }
+
+    public void release(final int ticket) {
+        consumerTicketToIndex.get(ticket).incrementAndGet();
+    }
+
+    public int subscribe() {
+        int ticket = ticketNext.getAndIncrement();
+        consumerTicketToIndex.put(ticket, new AtomicInteger(Math.max(0, producerIndex.get() - size)));
+        return ticket;
+    }
 }
 
 abstract class Producer {
-    public final BlockingBroadcastTransmitter transmitter = new BlockingBroadcastTransmitter(
-        new UnsafeBuffer(new byte[(int) (Math.pow(2, 22) + TRAILER_LENGTH)]));
     public final byte type;
+    public final RingBuffer<UnsafeBuffer> ringBuffer;
     private final Timer timer;
     private final Thread thread;
     
     Producer(final byte type, final int delay) {
+        ringBuffer = new RingBuffer<>(new Factory<>() {@Override UnsafeBuffer create() { return new UnsafeBuffer(); }}, 64);
         this.type = type;
         if (delay > 0) {
             timer = new Timer(delay, (ActionEvent actionEvent) -> produce());
@@ -88,7 +140,7 @@ abstract class Producer {
 }
 
 abstract class Consumer {
-    private final Set<BlockingBroadcastReceiver> receivers = ConcurrentHashMap.newKeySet();
+    private final Set<Tuple<Producer, Integer>> tuplesPublisherTicket = ConcurrentHashMap.newKeySet();
     private final byte type;
     private final Timer timer;
     private final Thread thread;
@@ -105,14 +157,19 @@ abstract class Consumer {
     }
     
     public void subscribe(final Producer producer) {
-        receivers.add(new BlockingBroadcastReceiver(producer.transmitter));
+        tuplesPublisherTicket.add(new Tuple<Producer, Integer>(producer, producer.ringBuffer.subscribe()));
     }
     
     private void run() {
-        for (final BlockingBroadcastReceiver receiver : receivers) {
-            if (receiver.receiveNext()
-                    && (type == Metadata.TYPE_ALL || type == Metadata.type(receiver.buffer(), receiver.offset(), receiver.length()))) {
-                consume(receiver.buffer(), receiver.offset(), receiver.length());
+        Producer producer;
+        int ticket;
+        for (final Tuple<Producer, Integer> tuple : tuplesPublisherTicket) {
+            producer = tuple.first;
+            ticket = tuple.second;
+            DirectBuffer buffer = producer.ringBuffer.acquire(ticket);
+            if (buffer != null) {
+                if (type == Metadata.TYPE_ALL || type == Metadata.type(buffer)) consume(buffer);
+                producer.ringBuffer.release(ticket);
             }
         }
     }
@@ -125,7 +182,7 @@ abstract class Consumer {
         thread.start();
     }
 
-    protected abstract void consume(final DirectBuffer buffer, final int offset, final int length);
+    protected abstract void consume(final DirectBuffer buffer);
 }
 
 class Camera extends Producer {
@@ -147,20 +204,20 @@ class Camera extends Producer {
         final long time = System.nanoTime();
         final BufferedImage bufferedImage;
         final ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
-        final UnsafeBuffer buffer;
+        final MutableDirectBuffer buffer = ringBuffer.claim();
         
         bufferedImage = new BufferedImage((int) dimension.getWidth(), (int) dimension.getHeight(), BufferedImage.TYPE_INT_ARGB);
         ImageUtilities.createBufferedImage(videoCapture.getNextFrame(), bufferedImage);
         try { ImageIO.write(bufferedImage, "png", byteArrayOutputStream); }
         catch (Exception exception) { exception.printStackTrace(); }
         byteArrayOutputStream.write(0);
-        buffer = new UnsafeBuffer(byteArrayOutputStream.toByteArray());
+        buffer.wrap(byteArrayOutputStream.toByteArray());
         
-        Metadata.setType(buffer, buffer.capacity(), type);
-        Metadata.setHost(buffer, buffer.capacity(), host);
-        Metadata.setPort(buffer, buffer.capacity(), port);
-        Metadata.setTime(buffer, buffer.capacity(), time);
-        transmitter.transmit(1, buffer, 0, buffer.capacity());
+        Metadata.setType(buffer, type);
+        Metadata.setHost(buffer, host);
+        Metadata.setPort(buffer, port);
+        Metadata.setTime(buffer, time);
+        ringBuffer.commit();
     }
 }
 
@@ -178,18 +235,19 @@ class Microphone extends Producer {
         targetDataLine.start();
         start();
     }
-
+    
     @Override protected void produce() {
         final long time = System.nanoTime();
-        final UnsafeBuffer buffer = new UnsafeBuffer(new byte[targetDataLine.available() + Metadata.SIZE]);
+        final UnsafeBuffer buffer = ringBuffer.claim();
         
+        buffer.wrap(new byte[targetDataLine.available() + Metadata.SIZE]);
         targetDataLine.read(buffer.byteArray(), 0, buffer.capacity() - Metadata.SIZE);
         
-        Metadata.setType(buffer, buffer.capacity(), type);
-        Metadata.setHost(buffer, buffer.capacity(), host);
-        Metadata.setPort(buffer, buffer.capacity(), port);
-        Metadata.setTime(buffer, buffer.capacity(), time);
-        transmitter.transmit(1, buffer, 0, buffer.capacity());
+        Metadata.setType(buffer, type);
+        Metadata.setHost(buffer, host);
+        Metadata.setPort(buffer, port);
+        Metadata.setTime(buffer, time);
+        ringBuffer.commit();
     }
 }
 
@@ -206,8 +264,8 @@ class Sender extends Consumer {
         publication.addDestination("aeron:udp?endpoint=" + address);
     }
 
-    @Override protected void consume(final DirectBuffer buffer, final int offset, final int length) {
-        final long outcome = publication.offer(buffer, offset, length);
+    @Override protected void consume(final DirectBuffer buffer) {
+        final long outcome = publication.offer(buffer);
         if (outcome < 0) System.out.println("Sender: " + outcome);
     }
 }
@@ -223,7 +281,10 @@ class Receiver extends Producer {
         this.aeron = aeron;
         this.address = address;
         final FragmentHandler fragmentHandler = (buffer, offset, length, header) -> {
-            transmitter.transmit(1, buffer, offset, length);
+            byte[] bytes = new byte[length];
+            buffer.getBytes(0, bytes);
+            ringBuffer.claim().wrap(bytes);
+            ringBuffer.commit();
         };
         fragmentAssembler = new FragmentAssembler(fragmentHandler, 0, true);
         subscription = aeron.addSubscription("aeron:udp?endpoint=" + address, 1);
@@ -253,14 +314,14 @@ class Speaker extends Consumer {
         start();
     }
     
-    @Override protected void consume(final DirectBuffer buffer, final int offset, final int length) {
-        sourceDataLine.write(buffer.byteArray(), offset, length - Metadata.SIZE);
+    @Override protected void consume(final DirectBuffer buffer) {
+        sourceDataLine.write(buffer.byteArray(), 0, buffer.capacity() - Metadata.SIZE);
     }
 }
 
 class Window extends Consumer {
     private final JFrame jFrame = new JFrame();
-    private final Long2ObjectHashMap<JLabel> idToJLabel = new Long2ObjectHashMap<>();
+    private final Long2ObjectHashMap<JLabel> addressToJLabel = new Long2ObjectHashMap<>();
 
     public Window(final Dimension dimension, final String address) {
         super(Metadata.TYPE_VIDEO, 0);
@@ -271,19 +332,19 @@ class Window extends Consumer {
         start();
     }
 
-    @Override protected void consume(final DirectBuffer buffer, final int offset, final int length) {
+    @Override protected void consume(final DirectBuffer buffer) {
         final BufferedImage bufferedImage;
-        try { bufferedImage = ImageIO.read(new DirectBufferInputStream(buffer, offset, length - Metadata.SIZE)); }
+        try { bufferedImage = ImageIO.read(new DirectBufferInputStream(buffer, 0, buffer.capacity() - Metadata.SIZE)); }
         catch (IOException exception) { return; }
         if (bufferedImage == null) return;
 
-        final long id = Metadata.host(buffer, offset, length) << 16 | Metadata.port(buffer, offset, length);
-        if (!idToJLabel.containsKey(id)) {
-            idToJLabel.put(id, new JLabel());
-            idToJLabel.get(id).setIcon(new ImageIcon());
-            jFrame.getContentPane().add(idToJLabel.get(id));
+        final long address = Metadata.host(buffer) << 16 | Metadata.port(buffer);
+        if (!addressToJLabel.containsKey(address)) {
+            addressToJLabel.put(address, new JLabel());
+            addressToJLabel.get(address).setIcon(new ImageIcon());
+            jFrame.getContentPane().add(addressToJLabel.get(address));
         }
-        ((ImageIcon) idToJLabel.get(id).getIcon()).setImage(bufferedImage);
+        ((ImageIcon) addressToJLabel.get(address).getIcon()).setImage(bufferedImage);
         jFrame.revalidate();
         jFrame.repaint();
     }
