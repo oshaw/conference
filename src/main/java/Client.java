@@ -21,6 +21,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 
 class Unsafe {
@@ -128,22 +129,20 @@ class RingBuffer<T> {
     }
 }
 
-abstract class Producer {
-    public final RingBuffer<Packet> ringBuffer;
+abstract class Daemon {
     private final Timer timer;
     private final Thread thread;
     
-    Producer(final int delay) {
-        ringBuffer = new RingBuffer<>(Packet.factory, 64);
+    Daemon(final int delay) {
         if (delay > 0) {
-            timer = new Timer(delay, (ActionEvent actionEvent) -> produce());
+            timer = new Timer(delay, (ActionEvent actionEvent) -> run());
             thread = null;
             return;
         }
         timer = null;
-        thread = new Thread(() -> { while (true) produce(); });
+        thread = new Thread(() -> { while (true) run(); });
     }
-    
+
     protected void start() {
         if (timer != null) {
             timer.start();
@@ -152,31 +151,36 @@ abstract class Producer {
         thread.start();
     }
     
+    abstract protected void run();
+}
+
+abstract class Producer extends Daemon {
+    public final RingBuffer<Packet> ringBuffer;
+    
+    Producer(final int delay) {
+        super(delay);
+        ringBuffer = new RingBuffer<>(Packet.factory, 64);
+    }
+    
+    @Override protected void run() { produce(); }
+    
     protected abstract void produce();
 }
 
-abstract class Consumer {
+abstract class Consumer extends Daemon {
     private final Set<Tuple<Producer, Integer>> tuplesPublisherTicket = ConcurrentHashMap.newKeySet();
     private final byte type;
-    private final Timer timer;
-    private final Thread thread;
 
-    Consumer(final byte type, final int delay) {
+    Consumer(final int delay, final byte type) {
+        super(delay);
         this.type = type;
-        if (delay != 0) {
-            timer = new Timer(delay, (ActionEvent actionEvent) -> run());
-            thread = null;
-            return;
-        }
-        timer = null;
-        thread = new Thread(() -> { while (true) run(); });
     }
     
     public void subscribe(final Producer producer) {
         tuplesPublisherTicket.add(new Tuple<Producer, Integer>(producer, producer.ringBuffer.subscribe()));
     }
     
-    private void run() {
+    @Override protected void run() {
         int ticket;
         Packet packet;
         Producer producer;
@@ -185,20 +189,10 @@ abstract class Consumer {
             ticket = tuple.second;
             packet = producer.ringBuffer.acquire(ticket);
             if (packet != null) {
-                if (type == Packet.TYPE_ALL || type == packet.type()) {
-                    consume(packet);
-                }
+                if (type == Packet.TYPE_ALL || type == packet.type()) consume(packet);
                 producer.ringBuffer.release(ticket);
             }
         }
-    }
-
-    protected void start() {
-        if (timer != null) {
-            timer.start();
-            return;
-        }
-        thread.start();
     }
 
     protected abstract void consume(final Packet metadata);
@@ -211,7 +205,7 @@ class Camera extends Producer {
     final VideoCapture videoCapture;
     
     public Camera(final Dimension dimension, final String addressPort) throws VideoCaptureException {
-        super(1000 / 30);
+        super(1000);
         this.address = Addressing.stringToAddress(addressPort);
         this.dimension = dimension;
         this.port = Addressing.stringToPort(addressPort);
@@ -237,7 +231,7 @@ class Microphone extends Producer {
     final TargetDataLine targetDataLine;
     
     public Microphone(final AudioFormat audioFormat, final String addressPort) throws LineUnavailableException {
-        super(1000 / 30);
+        super(1000);
         this.address = Addressing.stringToAddress(addressPort);
         this.port = Addressing.stringToPort(addressPort);
         targetDataLine = (TargetDataLine) AudioSystem.getLine(new DataLine.Info(TargetDataLine.class, audioFormat));
@@ -260,7 +254,7 @@ class Sender extends Consumer {
     private final Publication publication;
 
     public Sender(final Aeron aeron) {
-        super(Packet.TYPE_ALL, 0);
+        super(0, Packet.TYPE_ALL);
         publication = aeron.addPublication("aeron:udp?control-mode=manual", 1);
         start();
     }
@@ -312,7 +306,7 @@ class Speaker extends Consumer {
     private final SourceDataLine sourceDataLine;
     
     public Speaker(final AudioFormat audioFormat) throws LineUnavailableException {
-        super(Packet.TYPE_AUDIO, 0);
+        super(0, Packet.TYPE_AUDIO);
         sourceDataLine = (SourceDataLine) AudioSystem.getLine(new DataLine.Info(SourceDataLine.class, audioFormat));
         sourceDataLine.open(audioFormat);
         sourceDataLine.start();
@@ -329,7 +323,7 @@ class Window extends Consumer {
     private final Long2ObjectHashMap<JLabel> addressPortToJLabel = new Long2ObjectHashMap<>();
 
     public Window(final Dimension dimension, final String addressPort) {
-        super(Packet.TYPE_VIDEO, 0);
+        super(0, Packet.TYPE_VIDEO);
         jFrame.setLayout(new GridLayout(1, 1));
         jFrame.setSize((int) dimension.getWidth() * 3, (int) dimension.getHeight());
         jFrame.setTitle(addressPort);
