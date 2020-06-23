@@ -6,16 +6,22 @@ import io.aeron.driver.MediaDriver;
 import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.logbuffer.Header;
 import org.agrona.DirectBuffer;
+import org.agrona.MutableDirectBuffer;
 import org.agrona.collections.Long2ObjectHashMap;
 import org.agrona.concurrent.UnsafeBuffer;
+import org.agrona.io.DirectBufferInputStream;
+import org.openimaj.image.ImageUtilities;
 import org.openimaj.video.capture.VideoCapture;
 import org.openimaj.video.capture.VideoCaptureException;
 
+import javax.imageio.ImageIO;
 import javax.sound.sampled.*;
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.awt.image.BufferedImage;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.lang.reflect.Field;
 import java.util.Map;
 import java.util.Set;
@@ -63,20 +69,17 @@ class Packet extends UnsafeBuffer {
     
     public static Factory<Packet> factory = new Factory<Packet>() {@Override Packet create() { return new Packet(); }};
 
-    public byte type() { return getByte(0); }
-    public int address() { return getInt(1); }
-    public short port() { return getShort(1 + 4); }
-    public long time() { return getLong(1 + 4 + 2); }
+    public byte type() { return getByte(capacity() - SIZE_METADATA); }
+    public int address() { return getInt(capacity() - SIZE_METADATA + 1); }
+    public short port() { return getShort(capacity() - SIZE_METADATA + 1 + 4); }
+    public long time() { return getLong(capacity() - SIZE_METADATA + 1 + 4 + 2); }
     
-    public Packet clean() { if (byteArray() == null && capacity() > 0) Unsafe.unsafe.freeMemory(addressOffset()); return this; }
-    public int dataOffset() { return SIZE_METADATA; }
-    public long dataAddressOffset() { return (byteArray() == null ? addressOffset() : 0) + SIZE_METADATA; }
     public int dataLength() { return capacity() - SIZE_METADATA; }
     
-    public Packet setType(final byte type) { putByte(0, type); return this; }
-    public Packet setAddress(final int address) { putInt(1, address); return this; }
-    public Packet setPort(final short port) { putShort(1 + 4, port); return this; }
-    public Packet setTime(final long time) { putLong(1 + 4 + 2, time); return this; }
+    public Packet setType(final byte type) { putByte(capacity() - SIZE_METADATA, type); return this; }
+    public Packet setAddress(final int address) { putInt(capacity() - SIZE_METADATA + 1, address); return this; }
+    public Packet setPort(final short port) { putShort(capacity() - SIZE_METADATA + 1 + 4, port); return this; }
+    public Packet setTime(final long time) { putLong(capacity() - SIZE_METADATA + 1 + 4 + 2, time); return this; }
 }
 
 class Tuple<A, B> { A first; B second; public Tuple(A a, B b) { first = a; second = b; }}
@@ -204,8 +207,8 @@ class Camera extends Producer {
     final short port;
     final VideoCapture videoCapture;
     
-    public Camera(final Dimension dimension, final String addressPort) throws VideoCaptureException {
-        super(1000);
+    public Camera(final Dimension dimension, final int framesPerSecond, final String addressPort) throws VideoCaptureException {
+        super(1000 / framesPerSecond);
         this.address = Addressing.stringToAddress(addressPort);
         this.dimension = dimension;
         this.port = Addressing.stringToPort(addressPort);
@@ -215,12 +218,20 @@ class Camera extends Producer {
 
     @Override protected void produce() {
         final long time = System.nanoTime();
+        final BufferedImage bufferedImage;
+        final ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
         final Packet packet = ringBuffer.claim();
-        final int[] ints = videoCapture.getNextFrame().toPackedARGBPixels();
-        final int length = Packet.SIZE_METADATA + (ints.length * 4);
-        packet.clean().wrap(Unsafe.unsafe.allocateMemory(length), length);
-        packet.setType(Packet.TYPE_VIDEO).setAddress(address).setPort(port).setTime(time);
-        Unsafe.unsafe.copyMemory(ints, 16, null, packet.dataAddressOffset(), packet.dataLength());
+        
+        bufferedImage = new BufferedImage((int) dimension.getWidth(), (int) dimension.getHeight(), BufferedImage.TYPE_INT_ARGB);
+        ImageUtilities.createBufferedImage(videoCapture.getNextFrame(), bufferedImage);
+        try { ImageIO.write(bufferedImage, "png", byteArrayOutputStream); }
+        catch (Exception exception) { exception.printStackTrace(); }
+        packet.wrap(byteArrayOutputStream.toByteArray());
+        
+        packet.setType(Packet.TYPE_VIDEO);
+        packet.setAddress(address);
+        packet.setPort(port);
+        packet.setTime(time);
         ringBuffer.commit();
     }
 }
@@ -230,8 +241,8 @@ class Microphone extends Producer {
     final short port;
     final TargetDataLine targetDataLine;
     
-    public Microphone(final AudioFormat audioFormat, final String addressPort) throws LineUnavailableException {
-        super(1000);
+    public Microphone(final AudioFormat audioFormat, final int framesPerSecond, final String addressPort) throws LineUnavailableException {
+        super(1000 / framesPerSecond);
         this.address = Addressing.stringToAddress(addressPort);
         this.port = Addressing.stringToPort(addressPort);
         targetDataLine = (TargetDataLine) AudioSystem.getLine(new DataLine.Info(TargetDataLine.class, audioFormat));
@@ -243,9 +254,9 @@ class Microphone extends Producer {
     @Override protected void produce() {
         final long time = System.nanoTime();
         final Packet packet = ringBuffer.claim();
-        packet.clean().wrap(new byte[Packet.SIZE_METADATA + targetDataLine.available()]);
+        packet.wrap(new byte[targetDataLine.available() + Packet.SIZE_METADATA]);
         packet.setType(Packet.TYPE_AUDIO).setAddress(address).setPort(port).setTime(time);
-        targetDataLine.read(packet.byteArray(), packet.dataOffset(), packet.dataLength());
+        targetDataLine.read(packet.byteArray(), 0, packet.dataLength());
         ringBuffer.commit();
     }
 }
@@ -279,26 +290,27 @@ class Receiver extends Producer {
         super(Packet.TYPE_ALL);
         this.aeron = aeron;
         this.address = addressPort;
-        final FragmentHandler fragmentHandler = (final DirectBuffer buffer, final int offset, final int length, final Header header) -> {
-            final Packet packet = ringBuffer.claim();
-            packet.clean().wrap(new byte[length]);
-            buffer.getBytes(offset, packet, 0, length);
-            ringBuffer.commit();
-        };
-        fragmentAssembler = new FragmentAssembler(fragmentHandler, 0, true);
+        fragmentAssembler = new FragmentAssembler(this::receive, 0, true);
         subscription = aeron.addSubscription("aeron:udp?endpoint=" + addressPort, 1);
         start();
-    }
-    
-    private void reconnect() {
-        subscription.close();
-        subscription = aeron.addSubscription("aeron:udp?endpoint=" + address, 1);
-        try { Thread.sleep(1000); } catch (Exception exception) { exception.printStackTrace(); }
     }
     
     @Override protected void produce() {
         subscription.poll(fragmentAssembler, 100);
         if (subscription.hasNoImages()) reconnect();
+    }
+    
+    private void receive(final DirectBuffer buffer, final int offset, final int length, final Header header) {
+        final Packet packet = ringBuffer.claim();
+        packet.wrap(new byte[length]);
+        buffer.getBytes(offset, packet, 0, length);
+        ringBuffer.commit();
+    };
+    
+    private void reconnect() {
+        subscription.close();
+        subscription = aeron.addSubscription("aeron:udp?endpoint=" + address, 1);
+        try { Thread.sleep(1000); } catch (Exception exception) { exception.printStackTrace(); }
     }
 }
 
@@ -314,7 +326,7 @@ class Speaker extends Consumer {
     }
     
     @Override protected void consume(final Packet packet) {
-        sourceDataLine.write(packet.byteArray(), packet.dataOffset(), packet.dataLength());
+        sourceDataLine.write(packet.byteArray(), 0, packet.dataLength());
     }
 }
 
@@ -332,14 +344,13 @@ class Window extends Consumer {
     }
 
     @Override protected void consume(final Packet packet) {
-        BufferedImage bufferedImage = new BufferedImage(320, 240, BufferedImage.TYPE_INT_ARGB);
-        final int[] ints = new int[packet.dataLength() / 4];
-        Unsafe.unsafe.copyMemory(packet.byteArray(), packet.dataAddressOffset(), ints, 16, packet.dataLength());
-        bufferedImage.setRGB(0, 0, 320, 240, ints, 0, 320);
+        final BufferedImage bufferedImage;
+        try { bufferedImage = ImageIO.read(new DirectBufferInputStream(packet, 0, packet.dataLength())); }
+        catch (IOException exception) { return; }
+        if (bufferedImage == null) return;
         
         final long addressPort = packet.address() << 16 | packet.port();
         if (!addressPortToJLabel.containsKey(addressPort)) {
-            System.out.println(packet.address() + " " + packet.port());
             addressPortToJLabel.put(addressPort, new JLabel());
             addressPortToJLabel.get(addressPort).setIcon(new ImageIcon());
             jFrame.getContentPane().add(addressPortToJLabel.get(addressPort));
@@ -360,13 +371,14 @@ public class Client {
         final Aeron aeron = Aeron.connect(context);
         final AudioFormat audioFormat = new AudioFormat(8000.0f, 16, 1, true, true);
         final Dimension dimension = new Dimension(320, 240);
+        final int framesPerSecond = 30;
 
         sender = new Sender(aeron);
         final Speaker speaker = new Speaker(audioFormat);
         final Window window = new Window(dimension, addressPort);
 
-        final Camera camera = new Camera(dimension, addressPort);
-        final Microphone microphone = new Microphone(audioFormat, addressPort);
+        final Camera camera = new Camera(dimension, framesPerSecond, addressPort);
+        final Microphone microphone = new Microphone(audioFormat, framesPerSecond, addressPort);
         final Receiver receiver = new Receiver(aeron, addressPort);
 
         sender.subscribe(camera);
