@@ -30,21 +30,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 
-class Unsafe {
-    public static final sun.misc.Unsafe unsafe = get();
-    
-    private static sun.misc.Unsafe get() {
-        try {
-            final Field field = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
-            field.setAccessible(true);
-            return (sun.misc.Unsafe) field.get(null);
-        } catch (Exception exception) {
-            exception.printStackTrace();
-            return null;
-        }
-    }
-}
-
 abstract class Factory<T> { abstract T create(); }
 
 class Addressing {
@@ -76,10 +61,10 @@ class Packet extends UnsafeBuffer {
     
     public int dataLength() { return capacity() - SIZE_METADATA; }
     
-    public Packet setType(final byte type) { putByte(capacity() - SIZE_METADATA, type); return this; }
-    public Packet setAddress(final int address) { putInt(capacity() - SIZE_METADATA + 1, address); return this; }
-    public Packet setPort(final short port) { putShort(capacity() - SIZE_METADATA + 1 + 4, port); return this; }
-    public Packet setTime(final long time) { putLong(capacity() - SIZE_METADATA + 1 + 4 + 2, time); return this; }
+    public void setType(final byte type) { putByte(capacity() - SIZE_METADATA, type); }
+    public void setAddress(final int address) { putInt(capacity() - SIZE_METADATA + 1, address); }
+    public void setPort(final short port) { putShort(capacity() - SIZE_METADATA + 1 + 4, port); }
+    public void setTime(final long time) { putLong(capacity() - SIZE_METADATA + 1 + 4 + 2, time); }
 }
 
 class Tuple<A, B> { A first; B second; public Tuple(A a, B b) { first = a; second = b; }}
@@ -255,7 +240,10 @@ class Microphone extends Producer {
         final long time = System.nanoTime();
         final Packet packet = ringBuffer.claim();
         packet.wrap(new byte[targetDataLine.available() + Packet.SIZE_METADATA]);
-        packet.setType(Packet.TYPE_AUDIO).setAddress(address).setPort(port).setTime(time);
+        packet.setType(Packet.TYPE_AUDIO);
+        packet.setAddress(address);
+        packet.setPort(port);
+        packet.setTime(time);
         targetDataLine.read(packet.byteArray(), 0, packet.dataLength());
         ringBuffer.commit();
     }
