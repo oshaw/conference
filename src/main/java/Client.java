@@ -353,13 +353,14 @@ class Speaker extends Consumer {
 }
 
 class Window extends Consumer {
+    private final Dimension dimension;
     private final JFrame jFrame = new JFrame();
     private final Long2ObjectHashMap<JLabel> hostToJLabel = new Long2ObjectHashMap<>();
 
     public Window(final Dimension dimension, final String host) {
         super(0, Packet.TYPE_VIDEO);
+        this.dimension = dimension;
         jFrame.setLayout(new GridLayout(1, 1));
-        jFrame.setSize((int) dimension.getWidth() * 3, (int) dimension.getHeight());
         jFrame.setTitle(host);
         jFrame.setVisible(true);
         start();
@@ -382,6 +383,7 @@ class Window extends Consumer {
             hostToJLabel.put(host, new JLabel());
             hostToJLabel.get(host).setIcon(new ImageIcon());
             jFrame.getContentPane().add(hostToJLabel.get(host));
+            jFrame.setSize((int) dimension.getWidth() * hostToJLabel.size(), (int) dimension.getHeight());
         }
         ((ImageIcon) hostToJLabel.get(host).getIcon()).setImage(bufferedImage);
         jFrame.revalidate();
