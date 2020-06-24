@@ -21,6 +21,7 @@ import java.awt.event.ActionEvent;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -57,11 +58,11 @@ class Packet extends UnsafeBuffer {
     public short port() { return getShort(capacity() - SIZE_METADATA + 1 + 4 + 4); }
     public long time() { return getLong(capacity() - SIZE_METADATA + 1 + 4 + 4 + 2); }
     
-    public void setType(final byte type) { putByte(capacity() - SIZE_METADATA, type); }
-    public void setLength(final int length) { putInt(capacity() - SIZE_METADATA + 1, length); }
-    public void setAddress(final int address) { putInt(capacity() - SIZE_METADATA + 1 + 4, address); }
-    public void setPort(final short port) { putShort(capacity() - SIZE_METADATA + 1 + 4 + 4, port); }
-    public void setTime(final long time) { putLong(capacity() - SIZE_METADATA + 1 + 4 + 4 + 2, time); }
+    public Packet setType(final byte type) { putByte(capacity() - SIZE_METADATA, type); return this; }
+    public Packet setLength(final int length) { putInt(capacity() - SIZE_METADATA + 1, length); return this; }
+    public Packet setAddress(final int address) { putInt(capacity() - SIZE_METADATA + 1 + 4, address); return this; }
+    public Packet setPort(final short port) { putShort(capacity() - SIZE_METADATA + 1 + 4 + 4, port); return this; }
+    public Packet setTime(final long time) { putLong(capacity() - SIZE_METADATA + 1 + 4 + 4 + 2, time); return this; }
 }
 
 class Tuple<A, B> { A first; B second; public Tuple(A a, B b) { first = a; second = b; }}
@@ -142,9 +143,13 @@ abstract class Daemon {
 abstract class Producer extends Daemon {
     public final RingBuffer<Packet> buffer;
     
-    Producer(final int delay) {
+    Producer(final int delay) { this(delay, 64, Packet.factory); }
+
+    Producer(final int delay, final Factory<Packet> factory) { this(delay, 64, factory); }
+    
+    Producer(final int delay, final int size, final Factory<Packet> factory) {
         super(delay);
-        buffer = new RingBuffer<>(Packet.factory, 64);
+        buffer = new RingBuffer<>(factory, size);
     }
     
     @Override protected void run() { produce(); }
@@ -190,7 +195,7 @@ class Camera extends Producer {
     final short port;
     final VideoCapture videoCapture;
     
-    public Camera(final Dimension dimension, final int framesPerSecond, final String host) throws VideoCaptureException {
+    public Camera(final Dimension dimension, final byte framesPerSecond, final String host) throws VideoCaptureException {
         super(1000 / framesPerSecond);
         this.address = Addressing.hostToAddress(host);
         this.dimension = dimension;
@@ -208,47 +213,43 @@ class Camera extends Producer {
         bufferedImage = new BufferedImage((int) dimension.getWidth(), (int) dimension.getHeight(), BufferedImage.TYPE_INT_ARGB);
         ImageUtilities.createBufferedImage(videoCapture.getNextFrame(), bufferedImage);
         try { ImageIO.write(bufferedImage, "png", stream); }
-        catch (Exception exception) { exception.printStackTrace(); }
+        catch (Exception exception) { exception.printStackTrace(); return; }
         stream.write(bytesPadding, 0, BitUtil.align(stream.size(), 8) - stream.size() + Packet.SIZE_METADATA);
         packet.wrap(stream.toByteArray());
-        
-        packet.setType(Packet.TYPE_VIDEO);
-        packet.setLength(packet.capacity());
-        packet.setAddress(address);
-        packet.setPort(port);
-        packet.setTime(time);
+        packet.setType(Packet.TYPE_VIDEO).setLength(packet.capacity()).setAddress(address).setPort(port).setTime(time);
         buffer.commit();
     }
 }
 
 class Microphone extends Producer {
-    final int address;
-    final short port;
-    final TargetDataLine targetDataLine;
+    final TargetDataLine line;
     
-    public Microphone(final AudioFormat audioFormat, final int framesPerSecond, final String host) throws LineUnavailableException {
-        super(1000 / framesPerSecond);
-        this.address = Addressing.hostToAddress(host);
-        this.port = Addressing.hostToPort(host);
-        targetDataLine = (TargetDataLine) AudioSystem.getLine(new DataLine.Info(TargetDataLine.class, audioFormat));
-        targetDataLine.open(audioFormat);
-        targetDataLine.start();
+    public Microphone(final AudioFormat audioFormat, final byte framesPerSecond, final String host) throws LineUnavailableException {
+        super(1000 / framesPerSecond, new Factory<>() {
+            final int address = Addressing.hostToAddress(host);
+            final short port = Addressing.hostToPort(host);
+            final int length = (int) audioFormat.getSampleRate();
+
+            @Override Packet create() {
+                Packet packet = new Packet();
+                packet.wrap(new byte[BitUtil.align(length, 8) + Packet.SIZE_METADATA]);
+                packet.setType(Packet.TYPE_AUDIO).setAddress(address).setPort(port);
+                return packet;
+            }
+        });
+        line = (TargetDataLine) AudioSystem.getLine(new DataLine.Info(TargetDataLine.class, audioFormat));
+        line.open(audioFormat);
+        line.start();
         start();
     }
     
     @Override protected void produce() {
         final long time = System.nanoTime();
         final Packet packet = buffer.claim();
-        final int length = targetDataLine.available();
+        final int length = Math.min(packet.capacity() - Packet.SIZE_METADATA, line.available());
         
-        packet.wrap(new byte[BitUtil.align(length, 8) + Packet.SIZE_METADATA]);
-        packet.setType(Packet.TYPE_AUDIO);
-        packet.setLength(length);
-        packet.setAddress(address);
-        packet.setPort(port);
-        packet.setTime(time);
-        
-        targetDataLine.read(packet.byteArray(), 0, length);
+        line.read(packet.byteArray(), 0, length);
+        packet.setLength(length).setTime(time);
         buffer.commit();
     }
 }
@@ -401,7 +402,7 @@ public class Client {
         final Aeron aeron = Aeron.connect(context);
         final AudioFormat audioFormat = new AudioFormat(8000.0f, 16, 1, true, true);
         final Dimension dimension = new Dimension(320, 240);
-        final int framesPerSecond = 30;
+        final byte framesPerSecond = 30;
 
         sender = new Sender(aeron);
         final Speaker speaker = new Speaker(audioFormat);
