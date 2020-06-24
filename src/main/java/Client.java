@@ -28,17 +28,13 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.*;
 import java.util.regex.Pattern;
 
-class Addressing {
-    public static int hostToAddress(final String host) {
-        int address = 0;
-        for (String octet : host.substring(0, host.indexOf(':')).split(Pattern.quote("."))) {
-            address = address << 8 | Integer.parseInt(octet);
+class Host {
+    public static long stringToLong(final String input) {
+        long output = 0;
+        for (String octet : input.substring(0, input.indexOf(':')).split(Pattern.quote("."))) {
+            output = output << 8 | Integer.parseInt(octet);
         }
-        return address;
-    }
-    
-    public static short hostToPort(final String host) {
-        return Short.parseShort(host.substring(host.indexOf(':') + 1, host.length()));
+        return output << 16 + Short.parseShort(input.substring(input.indexOf(':') + 1));
     }
 }
 
@@ -68,7 +64,7 @@ class Logging {
 }
 
 class Packet extends UnsafeBuffer {
-    public static final byte SIZE_METADATA = 1 + 4 + 4 + 2 + 8 + 5;
+    public static final byte SIZE_METADATA = 1 + 4 + 8 + 8 + 3;
     public static final byte TYPE_ALL = -1;
     public static final byte TYPE_AUDIO = 0;
     public static final byte TYPE_VIDEO = 1;
@@ -77,15 +73,13 @@ class Packet extends UnsafeBuffer {
 
     public byte type() { return getByte(capacity() - SIZE_METADATA); }
     public int length() { return getInt(capacity() - SIZE_METADATA + 1); }
-    public int address() { return getInt(capacity() - SIZE_METADATA + 1 + 4); }
-    public short port() { return getShort(capacity() - SIZE_METADATA + 1 + 4 + 4); }
-    public long time() { return getLong(capacity() - SIZE_METADATA + 1 + 4 + 4 + 2); }
+    public long host() { return getLong(capacity() - SIZE_METADATA + 1 + 4); }
+    public long time() { return getLong(capacity() - SIZE_METADATA + 1 + 4 + 8 + 2); }
     
     public Packet setType(final byte type) { putByte(capacity() - SIZE_METADATA, type); return this; }
     public Packet setLength(final int length) { putInt(capacity() - SIZE_METADATA + 1, length); return this; }
-    public Packet setAddress(final int address) { putInt(capacity() - SIZE_METADATA + 1 + 4, address); return this; }
-    public Packet setPort(final short port) { putShort(capacity() - SIZE_METADATA + 1 + 4 + 4, port); return this; }
-    public Packet setTime(final long time) { putLong(capacity() - SIZE_METADATA + 1 + 4 + 4 + 2, time); return this; }
+    public Packet setHost(final long host) { putLong(capacity() - SIZE_METADATA + 1 + 4, host); return this; }
+    public Packet setTime(final long time) { putLong(capacity() - SIZE_METADATA + 1 + 4 + 8 + 2, time); return this; }
 }
 
 class Tuple<A, B> { A first; B second; public Tuple(A a, B b) { first = a; second = b; }}
@@ -210,17 +204,15 @@ abstract class Consumer extends Daemon {
 }
 
 class Camera extends Producer {
-    final int address;
     final byte[] bytesPadding = new byte[7 + Packet.SIZE_METADATA];
     final Dimension dimension;
-    final short port;
+    final long host;
     final VideoCapture videoCapture;
     
     public Camera(final Dimension dimension, final int framesPerSecond, final String host) throws VideoCaptureException {
         super(1000 / framesPerSecond);
-        this.address = Addressing.hostToAddress(host);
         this.dimension = dimension;
-        this.port = Addressing.hostToPort(host);
+        this.host = Host.stringToLong(host);
         videoCapture = new VideoCapture((int) dimension.getWidth(), (int) dimension.getHeight());
         start();
     }
@@ -234,24 +226,22 @@ class Camera extends Producer {
         bufferedImage = new BufferedImage((int) dimension.getWidth(), (int) dimension.getHeight(), BufferedImage.TYPE_INT_ARGB);
         ImageUtilities.createBufferedImage(videoCapture.getNextFrame(), bufferedImage);
         try { ImageIO.write(bufferedImage, "png", stream); }
-        catch (Exception exception) { exception.printStackTrace(); }
+        catch (Exception exception) { Logging.CAMERA.log(Level.WARNING, exception.toString(), exception); return; }
         stream.write(bytesPadding, 0, BitUtil.align(stream.size(), 8) - stream.size() + Packet.SIZE_METADATA);
         
         packet.wrap(stream.toByteArray());
-        packet.setType(Packet.TYPE_VIDEO).setLength(packet.capacity()).setAddress(address).setPort(port).setTime(time);
+        packet.setType(Packet.TYPE_VIDEO).setLength(packet.capacity()).setHost(host).setTime(time);
         buffer.commit();
     }
 }
 
 class Microphone extends Producer {
-    final int address;
-    final short port;
+    final long host;
     final TargetDataLine targetDataLine;
     
     public Microphone(final AudioFormat audioFormat, final int framesPerSecond, final String host) throws LineUnavailableException {
         super(1000 / framesPerSecond);
-        this.address = Addressing.hostToAddress(host);
-        this.port = Addressing.hostToPort(host);
+        this.host = Host.stringToLong(host);
         targetDataLine = (TargetDataLine) AudioSystem.getLine(new DataLine.Info(TargetDataLine.class, audioFormat));
         targetDataLine.open(audioFormat);
         targetDataLine.start();
@@ -264,7 +254,7 @@ class Microphone extends Producer {
         final int length = targetDataLine.available();
         
         packet.wrap(new byte[BitUtil.align(length, 8) + Packet.SIZE_METADATA]);
-        packet.setType(Packet.TYPE_AUDIO).setLength(length).setAddress(address).setPort(port).setTime(time);
+        packet.setType(Packet.TYPE_AUDIO).setLength(length).setHost(host).setTime(time);
         targetDataLine.read(packet.byteArray(), 0, length);
         buffer.commit();
     }
@@ -285,7 +275,7 @@ class Sender extends Consumer {
 
     @Override protected void consume(final Packet packet) {
         final long outcome = publication.offer(packet);
-        if (outcome < -1) Logging.SENDER.log(Level.WARNING, "publication.offer() = {0}", outcome);
+        // if (outcome < -1) Logging.SENDER.log(Level.WARNING, "publication.offer() = {0}", outcome);
     }
 }
 
@@ -335,7 +325,7 @@ class Speaker extends Consumer {
     
     @Override protected void consume(final Packet packet) {
         final byte[] bytes = new byte[packet.capacity()];
-        final long host = packet.address() << 16 | packet.port();
+        final long host = packet.host();
         RingBuffer<Packet> buffer;
         
         if (!hostToBuffer.containsKey(host)) {
@@ -389,7 +379,7 @@ class Window extends Consumer {
         catch (IOException exception) { Logging.WINDOW.log(Level.WARNING, exception.toString(), exception); return; }
         if (bufferedImage == null) { Logging.WINDOW.log(Level.WARNING, "bufferedImage == null"); return; }
         
-        final long host = packet.address() << 16 | packet.port();
+        final long host = packet.host();
         if (!hostToJLabel.containsKey(host)) {
             hostToJLabel.put(host, new JLabel());
             hostToJLabel.get(host).setIcon(new ImageIcon());
