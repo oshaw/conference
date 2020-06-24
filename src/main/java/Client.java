@@ -21,6 +21,9 @@ import java.awt.event.ActionEvent;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.net.DatagramSocket;
+import java.net.InetSocketAddress;
+import java.net.SocketException;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -28,14 +31,22 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.*;
 import java.util.regex.Pattern;
 
-class Host {
+class Address {
     public static long stringToLong(final String input) {
         long output = 0;
-        for (String octet : input.substring(0, input.indexOf(':')).split(Pattern.quote("."))) {
+        for (String octet : ip(input).split(Pattern.quote("."))) {
             output = output << 8 | Integer.parseInt(octet);
         }
-        return output << 16 + Short.parseShort(input.substring(input.indexOf(':') + 1));
+        return output << 16 + port(input);
     }
+
+    public static InetSocketAddress stringToInetSocketAddress(final String input) {
+        return new InetSocketAddress(ip(input), port(input));
+    }
+    
+    private static String ip(final String input) { return input.substring(0, input.indexOf(':')); }
+    
+    private static short port(final String input) { return Short.parseShort(input.substring(input.indexOf(':') + 1)); }
 }
 
 class Logging {
@@ -65,20 +76,22 @@ class Logging {
 
 class Packet extends UnsafeBuffer {
     public static final byte SIZE_METADATA = 1 + 4 + 8 + 8 + 3;
-    public static final byte TYPE_ALL = -1;
-    public static final byte TYPE_AUDIO = 0;
-    public static final byte TYPE_VIDEO = 1;
+    public static final byte TYPE_AUDIO      = (byte) 0b100000000;
+    public static final byte TYPE_VIDEO      = (byte) 0b010000000;
+    public static final byte TYPE_JOIN       = (byte) 0b001000000;
+    public static final byte TYPE_JOIN_REPLY = (byte) 0b000100000;
+    public static final byte TYPE_LEAVE      = (byte) 0b000010000;
     
     public static Factory<Packet> factory = new Factory<Packet>() {@Override Packet create() { return new Packet(); }};
 
     public byte type() { return getByte(capacity() - SIZE_METADATA); }
     public int length() { return getInt(capacity() - SIZE_METADATA + 1); }
-    public long host() { return getLong(capacity() - SIZE_METADATA + 1 + 4); }
+    public long address() { return getLong(capacity() - SIZE_METADATA + 1 + 4); }
     public long time() { return getLong(capacity() - SIZE_METADATA + 1 + 4 + 8 + 2); }
     
     public Packet setType(final byte type) { putByte(capacity() - SIZE_METADATA, type); return this; }
     public Packet setLength(final int length) { putInt(capacity() - SIZE_METADATA + 1, length); return this; }
-    public Packet setHost(final long host) { putLong(capacity() - SIZE_METADATA + 1 + 4, host); return this; }
+    public Packet setAddress(final long address) { putLong(capacity() - SIZE_METADATA + 1 + 4, address); return this; }
     public Packet setTime(final long time) { putLong(capacity() - SIZE_METADATA + 1 + 4 + 8 + 2, time); return this; }
 }
 
@@ -174,11 +187,11 @@ abstract class Producer extends Daemon {
 
 abstract class Consumer extends Daemon {
     private final Set<Tuple<RingBuffer<Packet>, Integer>> tuplesBufferTicket = ConcurrentHashMap.newKeySet();
-    private final byte type;
+    private final byte mask;
 
-    Consumer(final int delay, final byte type) {
+    Consumer(final int delay, final byte mask) {
         super(delay);
-        this.type = type;
+        this.mask = mask;
     }
 
     public void subscribe(final Producer producer) {
@@ -192,9 +205,9 @@ abstract class Consumer extends Daemon {
     @Override protected void run() {
         Packet packet;
         for (final Tuple<RingBuffer<Packet>, Integer> tuple : tuplesBufferTicket) {
-            packet = (Packet) tuple.first.acquire(tuple.second);
+            packet = tuple.first.acquire(tuple.second);
             if (packet != null) {
-                if (type == Packet.TYPE_ALL || type == packet.type()) consume(packet);
+                if ((packet.type() & mask) != 0) consume(packet);
                 tuple.first.release(tuple.second);
             }
         }
@@ -204,15 +217,15 @@ abstract class Consumer extends Daemon {
 }
 
 class Camera extends Producer {
+    final long address;
     final byte[] bytesPadding = new byte[7 + Packet.SIZE_METADATA];
     final Dimension dimension;
-    final long host;
     final VideoCapture videoCapture;
     
-    public Camera(final Dimension dimension, final int framesPerSecond, final String host) throws VideoCaptureException {
+    public Camera(final Dimension dimension, final int framesPerSecond, final String address) throws VideoCaptureException {
         super(1000 / framesPerSecond);
+        this.address = Address.stringToLong(address);
         this.dimension = dimension;
-        this.host = Host.stringToLong(host);
         videoCapture = new VideoCapture((int) dimension.getWidth(), (int) dimension.getHeight());
         start();
     }
@@ -230,18 +243,18 @@ class Camera extends Producer {
         stream.write(bytesPadding, 0, BitUtil.align(stream.size(), 8) - stream.size() + Packet.SIZE_METADATA);
         
         packet.wrap(stream.toByteArray());
-        packet.setType(Packet.TYPE_VIDEO).setLength(packet.capacity()).setHost(host).setTime(time);
+        packet.setType(Packet.TYPE_VIDEO).setLength(packet.capacity()).setAddress(address).setTime(time);
         buffer.commit();
     }
 }
 
 class Microphone extends Producer {
-    final long host;
+    final long address;
     final TargetDataLine targetDataLine;
     
-    public Microphone(final AudioFormat audioFormat, final int framesPerSecond, final String host) throws LineUnavailableException {
+    public Microphone(final AudioFormat audioFormat, final int framesPerSecond, final String address) throws LineUnavailableException {
         super(1000 / framesPerSecond);
-        this.host = Host.stringToLong(host);
+        this.address = Address.stringToLong(address);
         targetDataLine = (TargetDataLine) AudioSystem.getLine(new DataLine.Info(TargetDataLine.class, audioFormat));
         targetDataLine.open(audioFormat);
         targetDataLine.start();
@@ -254,17 +267,19 @@ class Microphone extends Producer {
         final int length = targetDataLine.available();
         
         packet.wrap(new byte[BitUtil.align(length, 8) + Packet.SIZE_METADATA]);
-        packet.setType(Packet.TYPE_AUDIO).setLength(length).setHost(host).setTime(time);
+        packet.setType(Packet.TYPE_AUDIO).setLength(length).setAddress(address).setTime(time);
         targetDataLine.read(packet.byteArray(), 0, length);
         buffer.commit();
     }
 }
 
 class Sender extends Consumer {
+    private final DatagramSocket datagramSocket;
     private final Publication publication;
 
-    public Sender(final Aeron aeron) {
-        super(0, Packet.TYPE_ALL);
+    public Sender(final Aeron aeron, final String address) throws SocketException {
+        super(0, (byte) 0b11000000);
+        datagramSocket = new DatagramSocket(Address.stringToInetSocketAddress(address));
         publication = aeron.addPublication("aeron:udp?control-mode=manual", 1);
         start();
     }
@@ -272,25 +287,33 @@ class Sender extends Consumer {
     public void addDestination(final String address) {
         publication.addDestination("aeron:udp?endpoint=" + address);
     }
-
+    
     @Override protected void consume(final Packet packet) {
-        final long outcome = publication.offer(packet);
+        final long outcome = multicast(packet);
         // if (outcome < -1) Logging.SENDER.log(Level.WARNING, "publication.offer() = {0}", outcome);
+    }
+    
+    public long unicast(final String address, final Packet packet) {
+        return 0L;
+    }
+    
+    public long multicast(final Packet packet) {
+        return publication.offer(packet);
     }
 }
 
 class Receiver extends Producer {
     private final Aeron aeron;
-    private final String host;
+    private final String address;
     private final FragmentAssembler fragmentAssembler;
     private Subscription subscription;
     
-    public Receiver(final Aeron aeron, final String host) {
-        super(Packet.TYPE_ALL);
+    public Receiver(final Aeron aeron, final String address) {
+        super(0);
         this.aeron = aeron;
-        this.host = host;
+        this.address = address;
         fragmentAssembler = new FragmentAssembler(this::receive, 0, true);
-        subscription = aeron.addSubscription("aeron:udp?endpoint=" + host, 1);
+        subscription = aeron.addSubscription("aeron:udp?endpoint=" + address, 1);
         start();
     }
     
@@ -308,14 +331,14 @@ class Receiver extends Producer {
     
     private void reconnect() {
         subscription.close();
-        subscription = aeron.addSubscription("aeron:udp?endpoint=" + host, 1);
+        subscription = aeron.addSubscription("aeron:udp?endpoint=" + address, 1);
         try { Thread.sleep(1000); } catch (Exception exception) { exception.printStackTrace(); }
     }
 }
 
 class Speaker extends Consumer {
     private final AudioFormat audioFormat;
-    private final Long2ObjectHashMap<RingBuffer<Packet>> hostToBuffer = new Long2ObjectHashMap<>();
+    private final Long2ObjectHashMap<RingBuffer<Packet>> addressToBuffer = new Long2ObjectHashMap<>();
     
     public Speaker(final AudioFormat audioFormat) {
         super(0, Packet.TYPE_AUDIO);
@@ -325,19 +348,19 @@ class Speaker extends Consumer {
     
     @Override protected void consume(final Packet packet) {
         final byte[] bytes = new byte[packet.capacity()];
-        final long host = packet.host();
+        final long address = packet.address();
         RingBuffer<Packet> buffer;
         
-        if (!hostToBuffer.containsKey(host)) {
+        if (!addressToBuffer.containsKey(address)) {
             final Line line;
             try { line = new Line(); } catch (LineUnavailableException exception) { exception.printStackTrace(); return; }
             buffer = new RingBuffer<>(Packet.factory, 4);
             line.subscribe(buffer);
-            hostToBuffer.put(host, buffer);
+            addressToBuffer.put(address, buffer);
         }
         
         packet.getBytes(0, bytes);
-        buffer = hostToBuffer.get(host);
+        buffer = addressToBuffer.get(address);
         buffer.claim().wrap(bytes);
         buffer.commit();
     }
@@ -362,13 +385,13 @@ class Speaker extends Consumer {
 class Window extends Consumer {
     private final Dimension dimension;
     private final JFrame jFrame = new JFrame();
-    private final Long2ObjectHashMap<JLabel> hostToJLabel = new Long2ObjectHashMap<>();
+    private final Long2ObjectHashMap<JLabel> addressToJLabel = new Long2ObjectHashMap<>();
 
-    public Window(final Dimension dimension, final String host) {
+    public Window(final Dimension dimension, final String address) {
         super(0, Packet.TYPE_VIDEO);
         this.dimension = dimension;
         jFrame.setLayout(new GridLayout(1, 1));
-        jFrame.setTitle(host);
+        jFrame.setTitle(address);
         jFrame.setVisible(true);
         start();
     }
@@ -379,24 +402,45 @@ class Window extends Consumer {
         catch (IOException exception) { Logging.WINDOW.log(Level.WARNING, exception.toString(), exception); return; }
         if (bufferedImage == null) { Logging.WINDOW.log(Level.WARNING, "bufferedImage == null"); return; }
         
-        final long host = packet.host();
-        if (!hostToJLabel.containsKey(host)) {
-            hostToJLabel.put(host, new JLabel());
-            hostToJLabel.get(host).setIcon(new ImageIcon());
-            jFrame.setSize((int) dimension.getWidth() * hostToJLabel.size(), (int) dimension.getHeight());
-            jFrame.getContentPane().add(hostToJLabel.get(host));
+        final long address = packet.address();
+        if (!addressToJLabel.containsKey(address)) {
+            addressToJLabel.put(address, new JLabel());
+            addressToJLabel.get(address).setIcon(new ImageIcon());
+            jFrame.setSize((int) dimension.getWidth() * addressToJLabel.size(), (int) dimension.getHeight());
+            jFrame.getContentPane().add(addressToJLabel.get(address));
         }
-        ((ImageIcon) hostToJLabel.get(host).getIcon()).setImage(bufferedImage);
+        ((ImageIcon) addressToJLabel.get(address).getIcon()).setImage(bufferedImage);
         jFrame.revalidate();
         jFrame.repaint();
     }
 }
 
+class Call {
+    private final ConcurrentHashMap.KeySetView<String, Boolean> participants = ConcurrentHashMap.newKeySet();
+    public final String host;
+    
+    public Call(final String host) {
+        this.host = host;
+    }
+
+    private void addParticipant(final String address) {
+        participants.add(address);
+    }
+
+    private void removeParticipant(final String address) {
+        participants.remove(address);
+    }
+}
+
 public class Client {
     private static final MediaDriver mediaDriver = MediaDriver.launchEmbedded();
+    private Call call;
+    private final String address;
     private final Sender sender;
     
-    public Client(final String host) throws LineUnavailableException, VideoCaptureException {
+    public Client(final String address) throws LineUnavailableException, VideoCaptureException {
+        this.address = address;
+        
         Aeron.Context context = new Aeron.Context();
         context.aeronDirectoryName(mediaDriver.aeronDirectoryName());
         final Aeron aeron = Aeron.connect(context);
@@ -406,11 +450,11 @@ public class Client {
 
         sender = new Sender(aeron);
         final Speaker speaker = new Speaker(audioFormat);
-        final Window window = new Window(dimension, host);
+        final Window window = new Window(dimension, address);
 
-        final Camera camera = new Camera(dimension, framesPerSecond, host);
-        final Microphone microphone = new Microphone(audioFormat, framesPerSecond, host);
-        final Receiver receiver = new Receiver(aeron, host);
+        final Camera camera = new Camera(dimension, framesPerSecond, address);
+        final Microphone microphone = new Microphone(audioFormat, framesPerSecond, address);
+        final Receiver receiver = new Receiver(aeron, address);
 
         sender.subscribe(camera);
         sender.subscribe(microphone);
@@ -419,18 +463,27 @@ public class Client {
         window.subscribe(receiver);
     }
     
-    public void addDestination(final String address) {
-        sender.addDestination(address);
+    public void host() {
+        call = new Call(address);
+    }
+    
+    public void join(String address) {
+        Packet packet = Packet.factory.create()
+            .setType(Packet.TYPE_JOIN)
+            .setAddress(Address.stringToLong(this.address));
+        sender.unicast(address, );
+        call = new Call(address);
+    }
+    
+    public void leave() {
+        
     }
     
     public static void main(final String[] arguments) throws LineUnavailableException, VideoCaptureException {
-        final String[] hosts = {"127.0.0.1:20000", "127.0.0.1:20001", "127.0.0.1:20002",};
-        final Client[] clients = {new Client(hosts[0]), new Client(hosts[1]), new Client(hosts[2]),};
-        clients[0].addDestination(hosts[1]);
-        clients[0].addDestination(hosts[2]);
-        clients[1].addDestination(hosts[0]);
-        clients[1].addDestination(hosts[2]);
-        clients[2].addDestination(hosts[0]);
-        clients[2].addDestination(hosts[1]);
+        final String[] addresss = {"127.0.0.1:20000", "127.0.0.1:20001", "127.0.0.1:20002",};
+        final Client[] clients = {new Client(addresss[0]), new Client(addresss[1]), new Client(addresss[2]),};
+        clients[0].address();
+        clients[1].join(clients[0].address);
+        clients[2].join(clients[0].address);
     }
 }
