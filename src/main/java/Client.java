@@ -32,16 +32,31 @@ import java.util.logging.*;
 import java.util.regex.Pattern;
 
 class Address {
+    public static String longToString(long input) {
+        final StringBuilder builder = new StringBuilder();
+        builder.append((short) input);
+        builder.insert(0, ':');
+        input = input >> 16;
+        for (int index = 0; index < 4; index += 1) {
+            builder.insert(0, (byte) input);
+            if (index != 3) {
+                builder.insert(0, '.');
+                input = input >> 8;
+            }
+        }
+        return builder.toString();
+    }
+
+    public static InetSocketAddress stringToInetSocketAddress(final String input) {
+        return new InetSocketAddress(ip(input), port(input));
+    }
+    
     public static long stringToLong(final String input) {
         long output = 0;
         for (String octet : ip(input).split(Pattern.quote("."))) {
             output = output << 8 | Integer.parseInt(octet);
         }
         return output << 16 + port(input);
-    }
-
-    public static InetSocketAddress stringToInetSocketAddress(final String input) {
-        return new InetSocketAddress(ip(input), port(input));
     }
     
     private static String ip(final String input) { return input.substring(0, input.indexOf(':')); }
@@ -76,6 +91,7 @@ class Logging {
 
 class Packet extends UnsafeBuffer {
     public static final byte SIZE_METADATA = 1 + 4 + 8 + 8 + 3;
+    
     public static final byte TYPE_AUDIO      = (byte) 0b100000000;
     public static final byte TYPE_VIDEO      = (byte) 0b010000000;
     public static final byte TYPE_JOIN       = (byte) 0b001000000;
@@ -83,7 +99,7 @@ class Packet extends UnsafeBuffer {
     public static final byte TYPE_LEAVE      = (byte) 0b000010000;
     
     public static Factory<Packet> factory = new Factory<Packet>() {@Override Packet create() { return new Packet(); }};
-
+    
     public byte type() { return getByte(capacity() - SIZE_METADATA); }
     public int length() { return getInt(capacity() - SIZE_METADATA + 1); }
     public long address() { return getLong(capacity() - SIZE_METADATA + 1 + 4); }
@@ -289,7 +305,7 @@ class Sender extends Consumer {
     }
     
     @Override protected void consume(final Packet packet) {
-        final long outcome = multicast(packet);
+        final long outcome = broadcast(packet);
         // if (outcome < -1) Logging.SENDER.log(Level.WARNING, "publication.offer() = {0}", outcome);
     }
     
@@ -297,7 +313,7 @@ class Sender extends Consumer {
         return 0L;
     }
     
-    public long multicast(final Packet packet) {
+    public long broadcast(final Packet packet) {
         return publication.offer(packet);
     }
 }
@@ -416,29 +432,36 @@ class Window extends Consumer {
 }
 
 class Call {
-    private final ConcurrentHashMap.KeySetView<String, Boolean> participants = ConcurrentHashMap.newKeySet();
+    public final ConcurrentHashMap.KeySetView<String, Boolean> participants = ConcurrentHashMap.newKeySet();
     public final String host;
     
     public Call(final String host) {
         this.host = host;
     }
 
-    private void addParticipant(final String address) {
+    public void addParticipant(final String address) {
         participants.add(address);
     }
 
-    private void removeParticipant(final String address) {
+    public void removeParticipant(final String address) {
         participants.remove(address);
     }
 }
 
-public class Client {
+public class Client extends Consumer {
     private static final MediaDriver mediaDriver = MediaDriver.launchEmbedded();
     private Call call;
     private final String address;
-    private final Sender sender;
     
-    public Client(final String address) throws LineUnavailableException, VideoCaptureException {
+    private final Sender sender;
+    private final Speaker speaker;
+    private final Window window;
+    private final Camera camera;
+    private final Microphone microphone;
+    private final Receiver receiver;
+
+    public Client(final String address) throws LineUnavailableException, SocketException, VideoCaptureException {
+        super(0, (byte) 0b00111000);
         this.address = address;
         
         Aeron.Context context = new Aeron.Context();
@@ -448,13 +471,12 @@ public class Client {
         final Dimension dimension = new Dimension(320, 240);
         final int framesPerSecond = 30;
 
-        sender = new Sender(aeron);
-        final Speaker speaker = new Speaker(audioFormat);
-        final Window window = new Window(dimension, address);
-
-        final Camera camera = new Camera(dimension, framesPerSecond, address);
-        final Microphone microphone = new Microphone(audioFormat, framesPerSecond, address);
-        final Receiver receiver = new Receiver(aeron, address);
+        sender = new Sender(aeron, address);
+        speaker = new Speaker(audioFormat);
+        window = new Window(dimension, address);
+        camera = new Camera(dimension, framesPerSecond, address);
+        microphone = new Microphone(audioFormat, framesPerSecond, address);
+        receiver = new Receiver(aeron, address);
 
         sender.subscribe(camera);
         sender.subscribe(microphone);
@@ -467,16 +489,45 @@ public class Client {
         call = new Call(address);
     }
     
-    public void join(String address) {
-        Packet packet = Packet.factory.create()
-            .setType(Packet.TYPE_JOIN)
-            .setAddress(Address.stringToLong(this.address));
-        sender.unicast(address, );
-        call = new Call(address);
+    public void join(String host) {
+        Packet packet = new Packet();
+        packet.wrap(new byte[Packet.SIZE_METADATA]);
+        packet.setType(Packet.TYPE_JOIN).setAddress(Address.stringToLong(this.address));
+        sender.unicast(host, packet);
     }
     
     public void leave() {
-        
+        if (call != null) {
+            final Packet packet = new Packet();
+            packet.wrap(new byte[Packet.SIZE_METADATA]);
+            packet.setType(Packet.TYPE_LEAVE).setAddress(Address.stringToLong(address));
+            sender.broadcast(packet);
+            call = null;
+        }
+    }
+
+    @Override protected void consume(Packet packet) {
+        switch (packet.type()) {
+            case Packet.TYPE_JOIN -> {
+                if (call != null) {
+                    // call.participants
+                    Packet response = new Packet();
+                    packet.wrap(new byte[Packet.SIZE_METADATA]);
+                    packet.setType(Packet.TYPE_JOIN_REPLY).setAddress(packet.address());
+                    sender.unicast(Address.longToString(packet.address()), );
+                }
+            }
+            case Packet.TYPE_JOIN_REPLY -> {
+                
+            }
+            case Packet.TYPE_LEAVE -> {
+                if (call != null) {
+                    call.removeParticipant(Address.longToString(packet.address()));
+                    speaker.removeAddress(packet.address());
+                    window.removeAddress(packet.address());
+                }
+            }
+        }
     }
     
     public static void main(final String[] arguments) throws LineUnavailableException, VideoCaptureException {
