@@ -342,6 +342,7 @@ class Speaker extends Consumer {
             super(0, Packet.TYPE_AUDIO);
             line = (SourceDataLine) AudioSystem.getLine(new DataLine.Info(SourceDataLine.class, audioFormat));
             line.open(audioFormat);
+            line.start();
             start();
         }
         
