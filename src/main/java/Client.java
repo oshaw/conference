@@ -3,11 +3,9 @@ import io.aeron.FragmentAssembler;
 import io.aeron.Publication;
 import io.aeron.Subscription;
 import io.aeron.driver.MediaDriver;
-import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.logbuffer.Header;
 import org.agrona.BitUtil;
 import org.agrona.DirectBuffer;
-import org.agrona.MutableDirectBuffer;
 import org.agrona.collections.Long2ObjectHashMap;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.io.DirectBufferInputStream;
@@ -23,27 +21,25 @@ import java.awt.event.ActionEvent;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.lang.reflect.Field;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Function;
 import java.util.regex.Pattern;
 
 abstract class Factory<T> { abstract T create(); }
 
 class Addressing {
-    public static int stringToAddress(final String addressPort) {
+    public static int hostToAddress(final String host) {
         int address = 0;
-        for (String octet : addressPort.substring(0, addressPort.indexOf(':')).split(Pattern.quote("."))) {
+        for (String octet : host.substring(0, host.indexOf(':')).split(Pattern.quote("."))) {
             address = address << 8 | Integer.parseInt(octet);
         }
         return address;
     }
     
-    public static short stringToPort(final String addressPort) {
-        return Short.parseShort(addressPort.substring(addressPort.indexOf(':') + 1, addressPort.length()));
+    public static short hostToPort(final String host) {
+        return Short.parseShort(host.substring(host.indexOf(':') + 1, host.length()));
     }
 }
 
@@ -144,11 +140,11 @@ abstract class Daemon {
 }
 
 abstract class Producer extends Daemon {
-    public final RingBuffer<Packet> ringBuffer;
+    public final RingBuffer<Packet> buffer;
     
     Producer(final int delay) {
         super(delay);
-        ringBuffer = new RingBuffer<>(Packet.factory, 64);
+        buffer = new RingBuffer<>(Packet.factory, 64);
     }
     
     @Override protected void run() { produce(); }
@@ -157,34 +153,34 @@ abstract class Producer extends Daemon {
 }
 
 abstract class Consumer extends Daemon {
-    private final Set<Tuple<Producer, Integer>> tuplesPublisherTicket = ConcurrentHashMap.newKeySet();
+    private final Set<Tuple<RingBuffer<Packet>, Integer>> tuplesBufferTicket = ConcurrentHashMap.newKeySet();
     private final byte type;
 
     Consumer(final int delay, final byte type) {
         super(delay);
         this.type = type;
     }
-    
+
     public void subscribe(final Producer producer) {
-        tuplesPublisherTicket.add(new Tuple<Producer, Integer>(producer, producer.ringBuffer.subscribe()));
+        tuplesBufferTicket.add(new Tuple<RingBuffer<Packet>, Integer>(producer.buffer, producer.buffer.subscribe()));
+    }
+    
+    public void subscribe(final RingBuffer<Packet> buffer) {
+        tuplesBufferTicket.add(new Tuple<RingBuffer<Packet>, Integer>(buffer, buffer.subscribe()));
     }
     
     @Override protected void run() {
-        int ticket;
         Packet packet;
-        Producer producer;
-        for (final Tuple<Producer, Integer> tuple : tuplesPublisherTicket) {
-            producer = tuple.first;
-            ticket = tuple.second;
-            packet = producer.ringBuffer.acquire(ticket);
+        for (final Tuple<RingBuffer<Packet>, Integer> tuple : tuplesBufferTicket) {
+            packet = (Packet) tuple.first.acquire(tuple.second);
             if (packet != null) {
                 if (type == Packet.TYPE_ALL || type == packet.type()) consume(packet);
-                producer.ringBuffer.release(ticket);
+                tuple.first.release(tuple.second);
             }
         }
     }
 
-    protected abstract void consume(final Packet metadata);
+    protected abstract void consume(final Packet packet);
 }
 
 class Camera extends Producer {
@@ -194,11 +190,11 @@ class Camera extends Producer {
     final short port;
     final VideoCapture videoCapture;
     
-    public Camera(final Dimension dimension, final int framesPerSecond, final String addressPort) throws VideoCaptureException {
+    public Camera(final Dimension dimension, final int framesPerSecond, final String host) throws VideoCaptureException {
         super(1000 / framesPerSecond);
-        this.address = Addressing.stringToAddress(addressPort);
+        this.address = Addressing.hostToAddress(host);
         this.dimension = dimension;
-        this.port = Addressing.stringToPort(addressPort);
+        this.port = Addressing.hostToPort(host);
         videoCapture = new VideoCapture((int) dimension.getWidth(), (int) dimension.getHeight());
         start();
     }
@@ -207,7 +203,7 @@ class Camera extends Producer {
         final long time = System.nanoTime();
         final BufferedImage bufferedImage;
         final ByteArrayOutputStream stream = new ByteArrayOutputStream();
-        final Packet packet = ringBuffer.claim();
+        final Packet packet = buffer.claim();
         
         bufferedImage = new BufferedImage((int) dimension.getWidth(), (int) dimension.getHeight(), BufferedImage.TYPE_INT_ARGB);
         ImageUtilities.createBufferedImage(videoCapture.getNextFrame(), bufferedImage);
@@ -221,7 +217,7 @@ class Camera extends Producer {
         packet.setAddress(address);
         packet.setPort(port);
         packet.setTime(time);
-        ringBuffer.commit();
+        buffer.commit();
     }
 }
 
@@ -230,10 +226,10 @@ class Microphone extends Producer {
     final short port;
     final TargetDataLine targetDataLine;
     
-    public Microphone(final AudioFormat audioFormat, final int framesPerSecond, final String addressPort) throws LineUnavailableException {
+    public Microphone(final AudioFormat audioFormat, final int framesPerSecond, final String host) throws LineUnavailableException {
         super(1000 / framesPerSecond);
-        this.address = Addressing.stringToAddress(addressPort);
-        this.port = Addressing.stringToPort(addressPort);
+        this.address = Addressing.hostToAddress(host);
+        this.port = Addressing.hostToPort(host);
         targetDataLine = (TargetDataLine) AudioSystem.getLine(new DataLine.Info(TargetDataLine.class, audioFormat));
         targetDataLine.open(audioFormat);
         targetDataLine.start();
@@ -242,7 +238,7 @@ class Microphone extends Producer {
     
     @Override protected void produce() {
         final long time = System.nanoTime();
-        final Packet packet = ringBuffer.claim();
+        final Packet packet = buffer.claim();
         final int length = targetDataLine.available();
         
         packet.wrap(new byte[BitUtil.align(length, 8) + Packet.SIZE_METADATA]);
@@ -253,7 +249,7 @@ class Microphone extends Producer {
         packet.setTime(time);
         
         targetDataLine.read(packet.byteArray(), 0, length);
-        ringBuffer.commit();
+        buffer.commit();
     }
 }
 
@@ -282,12 +278,12 @@ class Receiver extends Producer {
     private final FragmentAssembler fragmentAssembler;
     private Subscription subscription;
     
-    public Receiver(final Aeron aeron, final String addressPort) {
+    public Receiver(final Aeron aeron, final String host) {
         super(Packet.TYPE_ALL);
         this.aeron = aeron;
-        this.address = addressPort;
+        this.address = host;
         fragmentAssembler = new FragmentAssembler(this::receive, 0, true);
-        subscription = aeron.addSubscription("aeron:udp?endpoint=" + addressPort, 1);
+        subscription = aeron.addSubscription("aeron:udp?endpoint=" + host, 1);
         start();
     }
     
@@ -297,10 +293,10 @@ class Receiver extends Producer {
     }
     
     private void receive(final DirectBuffer buffer, final int offset, final int length, final Header header) {
-        final Packet packet = ringBuffer.claim();
+        final Packet packet = this.buffer.claim();
         packet.wrap(new byte[length]);
         buffer.getBytes(offset, packet, 0, length);
-        ringBuffer.commit();
+        this.buffer.commit();
     };
     
     private void reconnect() {
@@ -311,30 +307,59 @@ class Receiver extends Producer {
 }
 
 class Speaker extends Consumer {
-    private final SourceDataLine sourceDataLine;
+    private final AudioFormat audioFormat;
+    private final Long2ObjectHashMap<RingBuffer<Packet>> hostToBuffer = new Long2ObjectHashMap<>();
     
-    public Speaker(final AudioFormat audioFormat) throws LineUnavailableException {
+    public Speaker(final AudioFormat audioFormat) {
         super(0, Packet.TYPE_AUDIO);
-        sourceDataLine = (SourceDataLine) AudioSystem.getLine(new DataLine.Info(SourceDataLine.class, audioFormat));
-        sourceDataLine.open(audioFormat);
-        sourceDataLine.start();
+        this.audioFormat = audioFormat;
         start();
     }
     
     @Override protected void consume(final Packet packet) {
-        sourceDataLine.write(packet.byteArray(), 0, packet.length());
+        final byte[] bytes = new byte[packet.capacity()];
+        final long host = packet.address() << 16 | packet.port();
+        RingBuffer<Packet> buffer;
+        
+        if (!hostToBuffer.containsKey(host)) {
+            final Line line;
+            try { line = new Line(); } catch (LineUnavailableException exception) { exception.printStackTrace(); return; }
+            buffer = new RingBuffer<>(Packet.factory, 4);
+            line.subscribe(buffer);
+            hostToBuffer.put(host, buffer);
+        }
+        
+        packet.getBytes(0, bytes);
+        buffer = hostToBuffer.get(host);
+        buffer.claim().wrap(bytes);
+        buffer.commit();
+    }
+    
+    class Line extends Consumer {
+        private final SourceDataLine line;
+
+        Line() throws LineUnavailableException {
+            super(0, Packet.TYPE_AUDIO);
+            line = (SourceDataLine) AudioSystem.getLine(new DataLine.Info(SourceDataLine.class, audioFormat));
+            line.open(audioFormat);
+            start();
+        }
+        
+        @Override protected void consume(Packet packet) {
+            line.write(packet.byteArray(), 0, packet.length());
+        }
     }
 }
 
 class Window extends Consumer {
     private final JFrame jFrame = new JFrame();
-    private final Long2ObjectHashMap<JLabel> addressPortToJLabel = new Long2ObjectHashMap<>();
+    private final Long2ObjectHashMap<JLabel> hostToJLabel = new Long2ObjectHashMap<>();
 
-    public Window(final Dimension dimension, final String addressPort) {
+    public Window(final Dimension dimension, final String host) {
         super(0, Packet.TYPE_VIDEO);
         jFrame.setLayout(new GridLayout(1, 1));
         jFrame.setSize((int) dimension.getWidth() * 3, (int) dimension.getHeight());
-        jFrame.setTitle(addressPort);
+        jFrame.setTitle(host);
         jFrame.setVisible(true);
         start();
     }
@@ -343,21 +368,21 @@ class Window extends Consumer {
         final BufferedImage bufferedImage;
         try { bufferedImage = ImageIO.read(new DirectBufferInputStream(packet, 0, packet.length())); }
         catch (IOException exception) {
-            exception.printStackTrace();
+            // exception.printStackTrace();
             return;
         }
         if (bufferedImage == null) {
-            System.out.println("Window: bufferedImage == null");
+            // System.out.println("Window: bufferedImage == null");
             return;
         }
         
-        final long addressPort = packet.address() << 16 | packet.port();
-        if (!addressPortToJLabel.containsKey(addressPort)) {
-            addressPortToJLabel.put(addressPort, new JLabel());
-            addressPortToJLabel.get(addressPort).setIcon(new ImageIcon());
-            jFrame.getContentPane().add(addressPortToJLabel.get(addressPort));
+        final long host = packet.address() << 16 | packet.port();
+        if (!hostToJLabel.containsKey(host)) {
+            hostToJLabel.put(host, new JLabel());
+            hostToJLabel.get(host).setIcon(new ImageIcon());
+            jFrame.getContentPane().add(hostToJLabel.get(host));
         }
-        ((ImageIcon) addressPortToJLabel.get(addressPort).getIcon()).setImage(bufferedImage);
+        ((ImageIcon) hostToJLabel.get(host).getIcon()).setImage(bufferedImage);
         jFrame.revalidate();
         jFrame.repaint();
     }
@@ -367,7 +392,7 @@ public class Client {
     private static final MediaDriver mediaDriver = MediaDriver.launchEmbedded();
     private final Sender sender;
 
-    public Client(final String addressPort) throws LineUnavailableException, VideoCaptureException {
+    public Client(final String host) throws LineUnavailableException, VideoCaptureException {
         Aeron.Context context = new Aeron.Context();
         context.aeronDirectoryName(mediaDriver.aeronDirectoryName());
         final Aeron aeron = Aeron.connect(context);
@@ -377,11 +402,11 @@ public class Client {
 
         sender = new Sender(aeron);
         final Speaker speaker = new Speaker(audioFormat);
-        final Window window = new Window(dimension, addressPort);
+        final Window window = new Window(dimension, host);
 
-        final Camera camera = new Camera(dimension, framesPerSecond, addressPort);
-        final Microphone microphone = new Microphone(audioFormat, framesPerSecond, addressPort);
-        final Receiver receiver = new Receiver(aeron, addressPort);
+        final Camera camera = new Camera(dimension, framesPerSecond, host);
+        final Microphone microphone = new Microphone(audioFormat, framesPerSecond, host);
+        final Receiver receiver = new Receiver(aeron, host);
 
         sender.subscribe(camera);
         sender.subscribe(microphone);
@@ -395,13 +420,13 @@ public class Client {
     }
 
     public static void main(final String[] arguments) throws InterruptedException, LineUnavailableException, VideoCaptureException {
-        final String[] addressPorts = {"127.0.0.1:20000", "127.0.0.1:20001", "127.0.0.1:20002",};
-        final Client[] clients = {new Client(addressPorts[0]), new Client(addressPorts[1]), new Client(addressPorts[2]),};
-        clients[0].addDestination(addressPorts[1]);
-        clients[0].addDestination(addressPorts[2]);
-        clients[1].addDestination(addressPorts[0]);
-        clients[1].addDestination(addressPorts[2]);
-        clients[2].addDestination(addressPorts[0]);
-        clients[2].addDestination(addressPorts[1]);
+        final String[] hosts = {"127.0.0.1:20000", "127.0.0.1:20001", "127.0.0.1:20002",};
+        final Client[] clients = {new Client(hosts[0]), new Client(hosts[1]), new Client(hosts[2]),};
+        clients[0].addDestination(hosts[1]);
+        clients[0].addDestination(hosts[2]);
+        clients[1].addDestination(hosts[0]);
+        clients[1].addDestination(hosts[2]);
+        clients[2].addDestination(hosts[0]);
+        clients[2].addDestination(hosts[1]);
     }
 }
