@@ -53,7 +53,7 @@ class Logging {
     
     private static Handler handler;
     
-    private static Logger logger(Class clazz, Level level) {
+    private static Logger logger(final Class clazz, final Level level) {
         if (handler == null) {
             handler = new ConsoleHandler();
             System.setProperty("java.util.logging.SimpleFormatter.format", "%1$tF %1$tT %4$s %2$s %5$s%6$s%n");
@@ -442,7 +442,5 @@ public class Client {
         clients[1].addDestination(hosts[2]);
         clients[2].addDestination(hosts[0]);
         clients[2].addDestination(hosts[1]);
-        
-        Logging.CLIENT.log(Level.ALL, "Hello world!");
     }
 }
