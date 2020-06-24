@@ -81,11 +81,11 @@ class Packet extends UnsafeBuffer {
     public short port() { return getShort(capacity() - SIZE_METADATA + 1 + 4 + 4); }
     public long time() { return getLong(capacity() - SIZE_METADATA + 1 + 4 + 4 + 2); }
     
-    public void setType(final byte type) { putByte(capacity() - SIZE_METADATA, type); }
-    public void setLength(final int length) { putInt(capacity() - SIZE_METADATA + 1, length); }
-    public void setAddress(final int address) { putInt(capacity() - SIZE_METADATA + 1 + 4, address); }
-    public void setPort(final short port) { putShort(capacity() - SIZE_METADATA + 1 + 4 + 4, port); }
-    public void setTime(final long time) { putLong(capacity() - SIZE_METADATA + 1 + 4 + 4 + 2, time); }
+    public Packet setType(final byte type) { putByte(capacity() - SIZE_METADATA, type); return this; }
+    public Packet setLength(final int length) { putInt(capacity() - SIZE_METADATA + 1, length); return this; }
+    public Packet setAddress(final int address) { putInt(capacity() - SIZE_METADATA + 1 + 4, address); return this; }
+    public Packet setPort(final short port) { putShort(capacity() - SIZE_METADATA + 1 + 4 + 4, port); return this; }
+    public Packet setTime(final long time) { putLong(capacity() - SIZE_METADATA + 1 + 4 + 4 + 2, time); return this; }
 }
 
 class Tuple<A, B> { A first; B second; public Tuple(A a, B b) { first = a; second = b; }}
@@ -236,13 +236,9 @@ class Camera extends Producer {
         try { ImageIO.write(bufferedImage, "png", stream); }
         catch (Exception exception) { exception.printStackTrace(); }
         stream.write(bytesPadding, 0, BitUtil.align(stream.size(), 8) - stream.size() + Packet.SIZE_METADATA);
-        packet.wrap(stream.toByteArray());
         
-        packet.setType(Packet.TYPE_VIDEO);
-        packet.setLength(packet.capacity());
-        packet.setAddress(address);
-        packet.setPort(port);
-        packet.setTime(time);
+        packet.wrap(stream.toByteArray());
+        packet.setType(Packet.TYPE_VIDEO).setLength(packet.capacity()).setAddress(address).setPort(port).setTime(time);
         buffer.commit();
     }
 }
@@ -268,12 +264,7 @@ class Microphone extends Producer {
         final int length = targetDataLine.available();
         
         packet.wrap(new byte[BitUtil.align(length, 8) + Packet.SIZE_METADATA]);
-        packet.setType(Packet.TYPE_AUDIO);
-        packet.setLength(length);
-        packet.setAddress(address);
-        packet.setPort(port);
-        packet.setTime(time);
-        
+        packet.setType(Packet.TYPE_AUDIO).setLength(length).setAddress(address).setPort(port).setTime(time);
         targetDataLine.read(packet.byteArray(), 0, length);
         buffer.commit();
     }
