@@ -25,9 +25,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.logging.*;
 import java.util.regex.Pattern;
-
-abstract class Factory<T> { abstract T create(); }
 
 class Addressing {
     public static int hostToAddress(final String host) {
@@ -40,6 +39,31 @@ class Addressing {
     
     public static short hostToPort(final String host) {
         return Short.parseShort(host.substring(host.indexOf(':') + 1, host.length()));
+    }
+}
+
+class Logging {
+    public static final Logger CLIENT = logger(Client.class, Level.ALL);
+    public static final Logger CAMERA = logger(Camera.class, Level.ALL);
+    public static final Logger MICROPHONE = logger(Microphone.class, Level.ALL);
+    public static final Logger SENDER = logger(Sender.class, Level.ALL);
+    public static final Logger RECEIVER = logger(Receiver.class, Level.ALL);
+    public static final Logger SPEAKER = logger(Speaker.class, Level.ALL);
+    public static final Logger WINDOW = logger(Window.class, Level.ALL);
+    
+    private static Handler handler;
+    
+    private static Logger logger(Class clazz, Level level) {
+        if (handler == null) {
+            handler = new ConsoleHandler();
+            System.setProperty("java.util.logging.SimpleFormatter.format", "%1$tF %1$tT %4$s %2$s %5$s%6$s%n");
+            handler.setFormatter(new SimpleFormatter());
+            handler.setLevel(Level.ALL);
+        }
+        Logger logger = Logger.getLogger(clazz.getName());
+        logger.setLevel(level);
+        logger.addHandler(handler);
+        return logger;
     }
 }
 
@@ -113,6 +137,8 @@ class RingBuffer<T> {
         return ticket;
     }
 }
+
+abstract class Factory<T> { abstract T create(); }
 
 abstract class Daemon {
     private final Timer timer;
@@ -268,20 +294,20 @@ class Sender extends Consumer {
 
     @Override protected void consume(final Packet packet) {
         final long outcome = publication.offer(packet);
-        if (outcome < -1) System.out.println(outcome);
+        if (outcome < -1) Logging.SENDER.log(Level.WARNING, "publication.offer() = {0}", outcome);
     }
 }
 
 class Receiver extends Producer {
     private final Aeron aeron;
-    private final String address;
+    private final String host;
     private final FragmentAssembler fragmentAssembler;
     private Subscription subscription;
     
     public Receiver(final Aeron aeron, final String host) {
         super(Packet.TYPE_ALL);
         this.aeron = aeron;
-        this.address = host;
+        this.host = host;
         fragmentAssembler = new FragmentAssembler(this::receive, 0, true);
         subscription = aeron.addSubscription("aeron:udp?endpoint=" + host, 1);
         start();
@@ -301,7 +327,7 @@ class Receiver extends Producer {
     
     private void reconnect() {
         subscription.close();
-        subscription = aeron.addSubscription("aeron:udp?endpoint=" + address, 1);
+        subscription = aeron.addSubscription("aeron:udp?endpoint=" + host, 1);
         try { Thread.sleep(1000); } catch (Exception exception) { exception.printStackTrace(); }
     }
 }
@@ -369,21 +395,15 @@ class Window extends Consumer {
     @Override protected void consume(final Packet packet) {
         final BufferedImage bufferedImage;
         try { bufferedImage = ImageIO.read(new DirectBufferInputStream(packet, 0, packet.length())); }
-        catch (IOException exception) {
-            // exception.printStackTrace();
-            return;
-        }
-        if (bufferedImage == null) {
-            // System.out.println("Window: bufferedImage == null");
-            return;
-        }
+        catch (IOException exception) { Logging.WINDOW.log(Level.WARNING, exception.toString(), exception); return; }
+        if (bufferedImage == null) { Logging.WINDOW.log(Level.WARNING, "bufferedImage == null"); return; }
         
         final long host = packet.address() << 16 | packet.port();
         if (!hostToJLabel.containsKey(host)) {
             hostToJLabel.put(host, new JLabel());
             hostToJLabel.get(host).setIcon(new ImageIcon());
-            jFrame.getContentPane().add(hostToJLabel.get(host));
             jFrame.setSize((int) dimension.getWidth() * hostToJLabel.size(), (int) dimension.getHeight());
+            jFrame.getContentPane().add(hostToJLabel.get(host));
         }
         ((ImageIcon) hostToJLabel.get(host).getIcon()).setImage(bufferedImage);
         jFrame.revalidate();
@@ -394,7 +414,7 @@ class Window extends Consumer {
 public class Client {
     private static final MediaDriver mediaDriver = MediaDriver.launchEmbedded();
     private final Sender sender;
-
+    
     public Client(final String host) throws LineUnavailableException, VideoCaptureException {
         Aeron.Context context = new Aeron.Context();
         context.aeronDirectoryName(mediaDriver.aeronDirectoryName());
@@ -417,12 +437,12 @@ public class Client {
         window.subscribe(camera);
         window.subscribe(receiver);
     }
-
+    
     public void addDestination(final String address) {
         sender.addDestination(address);
     }
-
-    public static void main(final String[] arguments) throws InterruptedException, LineUnavailableException, VideoCaptureException {
+    
+    public static void main(final String[] arguments) throws LineUnavailableException, VideoCaptureException {
         final String[] hosts = {"127.0.0.1:20000", "127.0.0.1:20001", "127.0.0.1:20002",};
         final Client[] clients = {new Client(hosts[0]), new Client(hosts[1]), new Client(hosts[2]),};
         clients[0].addDestination(hosts[1]);
@@ -431,5 +451,7 @@ public class Client {
         clients[1].addDestination(hosts[2]);
         clients[2].addDestination(hosts[0]);
         clients[2].addDestination(hosts[1]);
+        
+        Logging.CLIENT.log(Level.ALL, "Hello world!");
     }
 }
