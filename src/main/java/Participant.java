@@ -21,9 +21,7 @@ import java.awt.event.ActionEvent;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.net.DatagramSocket;
-import java.net.InetSocketAddress;
-import java.net.SocketException;
+import java.net.*;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -48,27 +46,31 @@ class Address {
     }
 
     public static InetSocketAddress stringToInetSocketAddress(final String input) {
-        return new InetSocketAddress(ip(input), port(input));
+        return new InetSocketAddress(stringToHost(input), stringToPort(input));
     }
     
     public static long stringToLong(final String input) {
         long output = 0;
-        for (String octet : ip(input).split(Pattern.quote("."))) {
+        for (String octet : stringToHost(input).split(Pattern.quote("."))) {
             output = output << 8 | Integer.parseInt(octet);
         }
-        return output << 16 + port(input);
+        return output << 16 + stringToPort(input);
     }
     
-    private static String ip(final String input) { return input.substring(0, input.indexOf(':')); }
+    public static String stringToHost(final String input) { return input.substring(0, input.indexOf(':')); }
     
-    private static short port(final String input) { return Short.parseShort(input.substring(input.indexOf(':') + 1)); }
+    public static short stringToPort(final String input) { return Short.parseShort(input.substring(input.indexOf(':') + 1)); }
 }
 
 class Logging {
+    public static final Logger PARTICIPANT = logger(Participant.class, Level.ALL);
     public static final Logger CLIENT = logger(Client.class, Level.ALL);
+    public static final Logger SERVER = logger(Server.class, Level.ALL);
+    
     public static final Logger CAMERA = logger(Camera.class, Level.ALL);
     public static final Logger MICROPHONE = logger(Microphone.class, Level.ALL);
     public static final Logger SENDER = logger(Sender.class, Level.ALL);
+    
     public static final Logger RECEIVER = logger(Receiver.class, Level.ALL);
     public static final Logger SPEAKER = logger(Speaker.class, Level.ALL);
     public static final Logger WINDOW = logger(Window.class, Level.ALL);
@@ -448,93 +450,150 @@ class Call {
     }
 }
 
-public class Client extends Consumer {
+class Client {
+    final Socket socket;
+    
+    public Client(final String address) throws IOException {
+        socket = new Socket(Address.stringToHost(address), Address.stringToPort(address));
+    }
+    
+    public byte[] send(final String string) throws IOException {
+        socket.getOutputStream().write(string.getBytes());
+        return socket.getInputStream().readNBytes(1);
+    }
+}
+
+class Server {
+    final ServerSocket serverSocket;
+    
+    public Server(final String addressTCP) throws IOException {
+        serverSocket = new ServerSocket(Address.stringToPort(addressTCP));
+        new Thread(() -> {
+            while (true) {
+                try {
+                    final Socket socket = serverSocket.accept();
+                    final byte[] bytes = socket.getInputStream().readNBytes(1);
+                    socket.getOutputStream().write(bytes);
+                } catch (IOException exception) {
+                    Logging.SERVER.log(Level.WARNING, exception.toString(), exception);
+                }
+            }
+        }).start();
+    }
+}
+
+public class Participant extends Consumer {
     private static final MediaDriver mediaDriver = MediaDriver.launchEmbedded();
     private Call call;
-    private final String address;
+    private final String addressTCP;
+    private final String addressUDP;
+    private final Client client;
+    private final Server server;
     
-    private final Sender sender;
-    private final Speaker speaker;
-    private final Window window;
-    private final Camera camera;
-    private final Microphone microphone;
-    private final Receiver receiver;
+//    private final Sender sender;
+//    private final Speaker speaker;
+//    private final Window window;
+//    private final Camera camera;
+//    private final Microphone microphone;
+//    private final Receiver receiver;
 
-    public Client(final String address) throws LineUnavailableException, SocketException, VideoCaptureException {
+    public Participant(
+        final String addressUDP,
+        final String addressTCP
+    ) throws LineUnavailableException, IOException {
         super(0, (byte) 0b00111000);
-        this.address = address;
+        this.addressTCP = addressTCP;
+        this.addressUDP = addressUDP;
         
-        Aeron.Context context = new Aeron.Context();
-        context.aeronDirectoryName(mediaDriver.aeronDirectoryName());
-        final Aeron aeron = Aeron.connect(context);
-        final AudioFormat audioFormat = new AudioFormat(8000.0f, 16, 1, true, true);
-        final Dimension dimension = new Dimension(320, 240);
-        final int framesPerSecond = 30;
+//        Aeron.Context context = new Aeron.Context();
+//        context.aeronDirectoryName(mediaDriver.aeronDirectoryName());
+//        final Aeron aeron = Aeron.connect(context);
+//        final AudioFormat audioFormat = new AudioFormat(8000.0f, 16, 1, true, true);
+//        final Dimension dimension = new Dimension(320, 240);
+//        final int framesPerSecond = 30;
+        
+        final String string = "Hello world\n";
+        server = new Server(addressTCP);
+        client = new Client(addressTCP);
+        Logging.PARTICIPANT.log(Level.ALL, new String(client.send(string)));
+        Logging.PARTICIPANT.log(Level.ALL, new String(client.send(string)));
+        Logging.PARTICIPANT.log(Level.ALL, new String(client.send(string)));
 
-        sender = new Sender(aeron, address);
-        speaker = new Speaker(audioFormat);
-        window = new Window(dimension, address);
-        camera = new Camera(dimension, framesPerSecond, address);
-        microphone = new Microphone(audioFormat, framesPerSecond, address);
-        receiver = new Receiver(aeron, address);
-
-        sender.subscribe(camera);
-        sender.subscribe(microphone);
-        speaker.subscribe(receiver);
-        window.subscribe(camera);
-        window.subscribe(receiver);
+//        sender = new Sender(aeron, addressUDP);
+//        speaker = new Speaker(audioFormat);
+//        window = new Window(dimension, addressUDP);
+//        camera = new Camera(dimension, framesPerSecond, addressUDP);
+//        microphone = new Microphone(audioFormat, framesPerSecond, addressUDP);
+//        receiver = new Receiver(aeron, addressUDP);
+//
+//        sender.subscribe(camera);
+//        sender.subscribe(microphone);
+//        speaker.subscribe(receiver);
+//        window.subscribe(camera);
+//        window.subscribe(receiver);
     }
     
-    public void host() {
-        call = new Call(address);
-    }
-    
-    public void join(String host) {
-        Packet packet = new Packet();
-        packet.wrap(new byte[Packet.SIZE_METADATA]);
-        packet.setType(Packet.TYPE_JOIN).setAddress(Address.stringToLong(this.address));
-        sender.unicast(host, packet);
-    }
-    
-    public void leave() {
-        if (call != null) {
-            final Packet packet = new Packet();
-            packet.wrap(new byte[Packet.SIZE_METADATA]);
-            packet.setType(Packet.TYPE_LEAVE).setAddress(Address.stringToLong(address));
-            sender.broadcast(packet);
-            call = null;
-        }
-    }
-
+//    public void host() {
+//        call = new Call(addressUDP);
+//    }
+//    
+//    public void join(String host) {
+//        Packet packet = new Packet();
+//        packet.wrap(new byte[Packet.SIZE_METADATA]);
+//        packet.setType(Packet.TYPE_JOIN).setAddress(Address.stringToLong(this.addressUDP));
+//        sender.unicast(host, packet);
+//    }
+//    
+//    public void leave() {
+//        if (call != null) {
+//            final Packet packet = new Packet();
+//            packet.wrap(new byte[Packet.SIZE_METADATA]);
+//            packet.setType(Packet.TYPE_LEAVE).setAddress(Address.stringToLong(addressUDP));
+//            sender.broadcast(packet);
+//            call = null;
+//        }
+//    }
+//
     @Override protected void consume(Packet packet) {
-        switch (packet.type()) {
-            case Packet.TYPE_JOIN -> {
-                if (call != null) {
-                    // call.participants
-                    Packet response = new Packet();
-                    packet.wrap(new byte[Packet.SIZE_METADATA]);
-                    packet.setType(Packet.TYPE_JOIN_REPLY).setAddress(packet.address());
-                    sender.unicast(Address.longToString(packet.address()), );
-                }
-            }
-            case Packet.TYPE_JOIN_REPLY -> {
-                
-            }
-            case Packet.TYPE_LEAVE -> {
-                if (call != null) {
-                    call.removeParticipant(Address.longToString(packet.address()));
-                    speaker.removeAddress(packet.address());
-                    window.removeAddress(packet.address());
-                }
-            }
-        }
+//        switch (packet.type()) {
+//            case Packet.TYPE_JOIN: {
+//                if (call != null) {
+//                    final String address = Address.longToString(packet.address());
+//                    call.addParticipant(address);
+//                    sender.addDestination(address);
+//                    
+//                    final Packet packetOutgoing = new Packet();
+//                    packetOutgoing.wrap(new byte[Packet.SIZE_METADATA]);
+//                    packetOutgoing.setType(Packet.TYPE_JOIN_REPLY).setAddress(Address.stringToLong(this.addressUDP));
+//                    sender.unicast(Address.longToString(packet.address()), packetOutgoing);
+//
+//                    packetOutgoing.setType(Packet.TYPE_JOIN);
+//                    sender.broadcast(packetOutgoing);
+//                }
+//                break;
+//            }
+//            case Packet.TYPE_JOIN_REPLY: {
+//                break;
+//            }
+//            case Packet.TYPE_LEAVE: {
+//                if (call != null) {
+//                    call.removeParticipant(Address.longToString(packet.address()));
+////                    speaker.removeAddress(packet.address());
+////                    window.removeAddress(packet.address());
+//                }
+//                break;
+//            }
+//        }
     }
     
-    public static void main(final String[] arguments) throws LineUnavailableException, VideoCaptureException {
-        final String[] addresss = {"127.0.0.1:20000", "127.0.0.1:20001", "127.0.0.1:20002",};
-        final Client[] clients = {new Client(addresss[0]), new Client(addresss[1]), new Client(addresss[2]),};
-        clients[0].address();
-        clients[1].join(clients[0].address);
-        clients[2].join(clients[0].address);
+    public static void main(final String[] arguments) throws LineUnavailableException, IOException {
+        final Participant[] participants = {
+            new Participant("127.0.0.1:20000", "127.0.0.1:20001"),
+            new Participant("127.0.0.1:20002", "127.0.0.1:20003"),
+            new Participant("127.0.0.1:20004", "127.0.0.1:20005"),
+        };
+//        participants[0].host();
+//        participants[1].join(participants[0].addressUDP);
+//        participants[2].join(participants[0].addressUDP);
     }
 }
