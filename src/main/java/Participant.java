@@ -19,8 +19,7 @@ import javax.swing.*;
 import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.awt.image.BufferedImage;
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
+import java.io.*;
 import java.net.*;
 import java.util.Map;
 import java.util.Set;
@@ -451,15 +450,17 @@ class Call {
 }
 
 class Client {
-    final Socket socket;
-    
-    public Client(final String address) throws IOException {
+    public String send(final String address, final String string) throws IOException {
+        final BufferedReader reader;
+        final Socket socket;
+        final String response;
+        
         socket = new Socket(Address.stringToHost(address), Address.stringToPort(address));
-    }
-    
-    public byte[] send(final String string) throws IOException {
-        socket.getOutputStream().write(string.getBytes());
-        return socket.getInputStream().readNBytes(1);
+        new DataOutputStream(socket.getOutputStream()).writeBytes(string);
+        reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+        response = reader.readLine();
+        socket.close();
+        return response;
     }
 }
 
@@ -472,8 +473,9 @@ class Server {
             while (true) {
                 try {
                     final Socket socket = serverSocket.accept();
-                    final byte[] bytes = socket.getInputStream().readNBytes(1);
-                    socket.getOutputStream().write(bytes);
+                    final BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+                    final String string = reader.readLine();
+                    new DataOutputStream(socket.getOutputStream()).writeBytes(string + '\n');
                 } catch (IOException exception) {
                     Logging.SERVER.log(Level.WARNING, exception.toString(), exception);
                 }
@@ -514,10 +516,10 @@ public class Participant extends Consumer {
         
         final String string = "Hello world\n";
         server = new Server(addressTCP);
-        client = new Client(addressTCP);
-        Logging.PARTICIPANT.log(Level.ALL, new String(client.send(string)));
-        Logging.PARTICIPANT.log(Level.ALL, new String(client.send(string)));
-        Logging.PARTICIPANT.log(Level.ALL, new String(client.send(string)));
+        client = new Client();
+        Logging.PARTICIPANT.log(Level.ALL, client.send(addressTCP, string));
+        Logging.PARTICIPANT.log(Level.ALL, client.send(addressTCP, string));
+        Logging.PARTICIPANT.log(Level.ALL, client.send(addressTCP, string));
 
 //        sender = new Sender(aeron, addressUDP);
 //        speaker = new Speaker(audioFormat);
