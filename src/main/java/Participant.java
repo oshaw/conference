@@ -21,8 +21,6 @@ import java.awt.event.ActionEvent;
 import java.awt.image.BufferedImage;
 import java.io.*;
 import java.net.*;
-import java.nio.ByteBuffer;
-import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -65,29 +63,29 @@ class Address {
     }
 }
 
-class Logging {
-    public static final Logger PARTICIPANT = logger(Participant.class, Level.ALL);
-    public static final Logger TCP = logger(TCP.class, Level.ALL);
-    public static final Logger UDP = logger(UDP.class, Level.ALL);
-
-    public static final Logger CAMERA = logger(Camera.class, Level.ALL);
-    public static final Logger MICROPHONE = logger(Microphone.class, Level.ALL);
-    public static final Logger SPEAKER = logger(Speaker.class, Level.ALL);
-    public static final Logger WINDOW = logger(Window.class, Level.ALL);
-    
+class Log {
     private static java.util.logging.Handler handler;
+    private static ConcurrentHashMap<String, Logger> nameToLogger = new ConcurrentHashMap<>();
     
-    private static Logger logger(final Class clazz, final Level level) {
+    public static Logger of(final Object object) {
+        return of(object.getClass());
+    }
+    
+    public static Logger of(final Class clazz) {
         if (handler == null) {
             handler = new ConsoleHandler();
             System.setProperty("java.util.logging.SimpleFormatter.format", "%1$tF %1$tT %4$s %2$s %5$s%6$s%n");
             handler.setFormatter(new SimpleFormatter());
             handler.setLevel(Level.ALL);
         }
-        final Logger logger = Logger.getLogger(clazz.getName());
-        logger.setLevel(level);
-        logger.addHandler(handler);
-        return logger;
+        
+        if (!nameToLogger.containsKey(clazz.getName())) {
+            final Logger logger = Logger.getLogger(clazz.getName());
+            logger.setLevel(Level.ALL);
+            logger.addHandler(handler);
+            nameToLogger.put(clazz.getName(), logger);
+        }
+        return nameToLogger.get(clazz.getName());
     }
 }
 
@@ -103,12 +101,12 @@ class Packet extends UnsafeBuffer {
     
     public byte type() { return getByte(capacity() - SIZE_METADATA); }
     public int length() { return getInt(capacity() - SIZE_METADATA + 1); }
-    public long address() { return getLong(capacity() - SIZE_METADATA + 1 + 4); }
+    public long addressUDP() { return getLong(capacity() - SIZE_METADATA + 1 + 4); }
     public long time() { return getLong(capacity() - SIZE_METADATA + 1 + 4 + 8 + 2); }
     
     public Packet setType(final byte type) { putByte(capacity() - SIZE_METADATA, type); return this; }
     public Packet setLength(final int length) { putInt(capacity() - SIZE_METADATA + 1, length); return this; }
-    public Packet setAddress(final long address) { putLong(capacity() - SIZE_METADATA + 1 + 4, address); return this; }
+    public Packet setAddressUDP(final long addressUDP) { putLong(capacity() - SIZE_METADATA + 1 + 4, addressUDP); return this; }
     public Packet setTime(final long time) { putLong(capacity() - SIZE_METADATA + 1 + 4 + 8 + 2, time); return this; }
 }
 
@@ -242,14 +240,14 @@ abstract class Consumer extends Daemon {
 }
 
 class Camera extends Producer {
-    final long address;
+    final long addressUDP;
     final byte[] bytesPadding = new byte[7 + Packet.SIZE_METADATA];
     final Dimension dimension;
     final VideoCapture videoCapture;
     
-    public Camera(final Dimension dimension, final int framesPerSecond, final long address) throws VideoCaptureException {
+    public Camera(final Dimension dimension, final int framesPerSecond, final long addressUDP) throws VideoCaptureException {
         super(1000 / framesPerSecond);
-        this.address = address;
+        this.addressUDP = addressUDP;
         this.dimension = dimension;
         videoCapture = new VideoCapture((int) dimension.getWidth(), (int) dimension.getHeight());
         start();
@@ -264,22 +262,22 @@ class Camera extends Producer {
         bufferedImage = new BufferedImage((int) dimension.getWidth(), (int) dimension.getHeight(), BufferedImage.TYPE_INT_ARGB);
         ImageUtilities.createBufferedImage(videoCapture.getNextFrame(), bufferedImage);
         try { ImageIO.write(bufferedImage, "png", stream); }
-        catch (Exception exception) { Logging.CAMERA.log(Level.WARNING, exception.toString(), exception); return; }
+        catch (Exception exception) { Log.of(this).warning(exception.toString()); return; }
         stream.write(bytesPadding, 0, BitUtil.align(stream.size(), 8) - stream.size() + Packet.SIZE_METADATA);
         
         packet.wrap(stream.toByteArray());
-        packet.setType(Packet.TYPE_VIDEO).setLength(packet.capacity()).setAddress(address).setTime(time);
+        packet.setType(Packet.TYPE_VIDEO).setLength(packet.capacity()).setAddressUDP(addressUDP).setTime(time);
         buffer.commit();
     }
 }
 
 class Microphone extends Producer {
-    final long address;
+    final long addressUDP;
     final TargetDataLine targetDataLine;
     
-    public Microphone(final AudioFormat audioFormat, final int framesPerSecond, final long address) throws LineUnavailableException {
+    public Microphone(final AudioFormat audioFormat, final int framesPerSecond, final long addressUDP) throws LineUnavailableException {
         super(1000 / framesPerSecond);
-        this.address = address;
+        this.addressUDP = addressUDP;
         targetDataLine = (TargetDataLine) AudioSystem.getLine(new DataLine.Info(TargetDataLine.class, audioFormat));
         targetDataLine.open(audioFormat);
         targetDataLine.start();
@@ -292,7 +290,7 @@ class Microphone extends Producer {
         final int length = targetDataLine.available();
         
         packet.wrap(new byte[BitUtil.align(length, 8) + Packet.SIZE_METADATA]);
-        packet.setType(Packet.TYPE_AUDIO).setLength(length).setAddress(address).setTime(time);
+        packet.setType(Packet.TYPE_AUDIO).setLength(length).setAddressUDP(addressUDP).setTime(time);
         targetDataLine.read(packet.byteArray(), 0, length);
         buffer.commit();
     }
@@ -300,7 +298,7 @@ class Microphone extends Producer {
 
 class Speaker extends Consumer {
     private final AudioFormat audioFormat;
-    private final Long2ObjectHashMap<Tuple<RingBuffer<Packet>, Line>> addressToBufferAndLine = new Long2ObjectHashMap<>();
+    private final Long2ObjectHashMap<Tuple<RingBuffer<Packet>, Line>> addressUDPToBufferAndLine = new Long2ObjectHashMap<>();
     
     public Speaker(final AudioFormat audioFormat) {
         super(0, Packet.TYPE_AUDIO);
@@ -310,28 +308,28 @@ class Speaker extends Consumer {
     
     @Override protected void consume(final Packet packet) {
         final byte[] bytes = new byte[packet.capacity()];
-        final long address = packet.address();
+        final long address = packet.addressUDP();
         RingBuffer<Packet> buffer;
         
-        if (!addressToBufferAndLine.containsKey(address)) {
+        if (!addressUDPToBufferAndLine.containsKey(address)) {
             final Line line;
             try { line = new Line(); } catch (LineUnavailableException exception) { exception.printStackTrace(); return; }
             buffer = new RingBuffer<>(Packet::factory, 4);
             line.subscribe(buffer);
-            addressToBufferAndLine.put(address, new Tuple<>(buffer, line));
+            addressUDPToBufferAndLine.put(address, new Tuple<>(buffer, line));
         }
         
         packet.getBytes(0, bytes);
-        buffer = addressToBufferAndLine.get(address).first;
+        buffer = addressUDPToBufferAndLine.get(address).first;
         buffer.claim().wrap(bytes);
         buffer.commit();
     }
 
-    public void removeAddress(final long address) {
-        if (addressToBufferAndLine.containsKey(address)) {
-            final Tuple<RingBuffer<Packet>, Line> tuple = addressToBufferAndLine.get(address);
+    public void removeAddress(final long addressUDP) {
+        if (addressUDPToBufferAndLine.containsKey(addressUDP)) {
+            final Tuple<RingBuffer<Packet>, Line> tuple = addressUDPToBufferAndLine.get(addressUDP);
             tuple.second.stop();
-            addressToBufferAndLine.remove(address);
+            addressUDPToBufferAndLine.remove(addressUDP);
         }
     }
 
@@ -360,13 +358,13 @@ class Speaker extends Consumer {
 class Window extends Consumer {
     private final Dimension dimension;
     private final JFrame jFrame = new JFrame();
-    private final Long2ObjectHashMap<JLabel> addressToJLabel = new Long2ObjectHashMap<>();
+    private final Long2ObjectHashMap<JLabel> addressUDPToJLabel = new Long2ObjectHashMap<>();
 
-    public Window(final Dimension dimension, final long address) {
+    public Window(final Dimension dimension, final long addressUDP) {
         super(0, Packet.TYPE_VIDEO);
         this.dimension = dimension;
         jFrame.setLayout(new GridLayout(1, 1));
-        jFrame.setTitle(Address.longToString(address));
+        jFrame.setTitle(Address.longToString(addressUDP));
         jFrame.setVisible(true);
         start();
     }
@@ -374,48 +372,49 @@ class Window extends Consumer {
     @Override protected void consume(final Packet packet) {
         final BufferedImage bufferedImage;
         try { bufferedImage = ImageIO.read(new DirectBufferInputStream(packet, 0, packet.length())); }
-        catch (IOException exception) { Logging.WINDOW.log(Level.WARNING, exception.toString(), exception); return; }
-        if (bufferedImage == null) { Logging.WINDOW.log(Level.WARNING, "bufferedImage == null"); return; }
+        catch (IOException exception) { Log.of(this).warning(exception.toString()); return; }
+        if (bufferedImage == null) { Log.of(this).warning("bufferedImage == null"); return; }
         
-        final long address = packet.address();
-        if (!addressToJLabel.containsKey(address)) {
-            addressToJLabel.put(address, new JLabel());
-            addressToJLabel.get(address).setIcon(new ImageIcon());
-            jFrame.getContentPane().add(addressToJLabel.get(address));
+        final long address = packet.addressUDP();
+        if (!addressUDPToJLabel.containsKey(address)) {
+            addressUDPToJLabel.put(address, new JLabel());
+            addressUDPToJLabel.get(address).setIcon(new ImageIcon());
+            jFrame.getContentPane().add(addressUDPToJLabel.get(address));
         }
-        ((ImageIcon) addressToJLabel.get(address).getIcon()).setImage(bufferedImage);
+        ((ImageIcon) addressUDPToJLabel.get(address).getIcon()).setImage(bufferedImage);
         repaint();
     }
 
-    public void removeAddress(final long address) {
-        if (addressToJLabel.containsKey(address)) {
-            jFrame.getContentPane().remove(addressToJLabel.get(address));
-            addressToJLabel.remove(address);
+    public void removeAddress(final long addressUDP) {
+        if (addressUDPToJLabel.containsKey(addressUDP)) {
+            jFrame.getContentPane().remove(addressUDPToJLabel.get(addressUDP));
+            addressUDPToJLabel.remove(addressUDP);
             repaint();
         }
     }
     
     private void repaint() {
-        jFrame.setSize((int) dimension.getWidth() * addressToJLabel.size(), (int) dimension.getHeight());
+        jFrame.setSize((int) dimension.getWidth() * addressUDPToJLabel.size(), (int) dimension.getHeight());
         jFrame.revalidate();
         jFrame.repaint();
     }
 }
 
 class Call {
-    public final ConcurrentHashMap.KeySetView<Long, Boolean> participants = ConcurrentHashMap.newKeySet();
-    public final long addressHost;
+    public final ConcurrentHashMap.KeySetView<Long, Boolean> addressUDPs = ConcurrentHashMap.newKeySet();
+    public final long addressUDPHost;
     
-    public Call(final long addressHost) {
-        this.addressHost = addressHost;
+    public Call(final long addressUDPHost) {
+        this.addressUDPHost = addressUDPHost;
+        addressUDPs.add(addressUDPHost);
     }
 
-    public void addParticipant(final long address) {
-        participants.add(address);
+    public void addParticipant(final long addressUDP) {
+        addressUDPs.add(addressUDP);
     }
 
-    public void removeAddress(final long address) {
-        participants.remove(address);
+    public void removeAddress(final long addressUDP) {
+        addressUDPs.remove(addressUDP);
     }
 }
 
@@ -425,7 +424,7 @@ class TCP {
     }
     
     public static byte[] unicast(final long address, final Packet packet) throws IOException {
-        Logging.TCP.log(Level.ALL, Address.longToString(address));
+        Log.of(TCP.class).info(Address.longToString(address));
         final Socket socket = new Socket(Address.longToHost(address), Address.longToPort(address));
         final OutputStream outputStream = socket.getOutputStream();
         outputStream.write(packet.byteArray());
@@ -445,7 +444,7 @@ class TCP {
             this.handler = handler;
             serverSocket = new ServerSocket();
             serverSocket.bind(Address.longToInetSocketAddress(address));
-            Logging.TCP.log(Level.ALL, Address.longToString(address));
+            Log.of(this).info(Address.longToString(address));
             new Thread(() -> {
                 while (true) {
                     try {
@@ -455,7 +454,7 @@ class TCP {
                         packet.wrap(reader.readLine().getBytes());
                         handler.handle(socket, packet);
                     } catch (Exception exception) {
-                        Logging.TCP.log(Level.WARNING, exception.toString(), exception);
+                        Log.of(TCP.Server.class).warning(exception.toString());
                     }
                 }
             }).start();
@@ -467,21 +466,24 @@ class TCP {
 
 class UDP {
     static class Broadcaster extends Consumer {
+        private final long addressUDP;
         private final Publication publication;
 
-        public Broadcaster(final Aeron aeron) throws SocketException {
+        public Broadcaster(final Aeron aeron, final long addressUDP) {
             super(0, (byte) 0b11000000);
+            this.addressUDP = addressUDP;
             publication = aeron.addPublication("aeron:udp?control-mode=manual", 1);
             start();
         }
 
-        public void addDestination(final long address) {
-            publication.addDestination("aeron:udp?endpoint=" + Address.longToString(address));
+        public void addDestination(final long addressUDP) {
+            Log.of(this).info("origin=" + Address.longToString(this.addressUDP) + " destination=" + Address.longToString(addressUDP));
+            publication.addDestination("aeron:udp?endpoint=" + Address.longToString(addressUDP));
         }
 
         @Override protected void consume(final Packet packet) {
             final long outcome = publication.offer(packet);
-            // if (outcome < -1) Logging.SENDER.log(Level.WARNING, "publication.offer() = {0}", outcome);
+            // if (outcome < -1) Log.SENDER.log(Level.WARNING, "publication.offer() = {0}", outcome);
         }
     }
 
@@ -528,14 +530,14 @@ public class Participant {
     private final long addressTCP;
     private final long addressUDP;
 
-//    private final Camera camera;
-//    private final Microphone microphone;
-//    private final UDP.Broadcaster broadcaster;
-//    private final UDP.Receiver receiver;
-//    private final Speaker speaker;
-//    private final Window window;
+    private final Camera camera;
+    private final Microphone microphone;
+    private final UDP.Broadcaster broadcaster;
+    private final UDP.Receiver receiver;
+    private final Speaker speaker;
+    private final Window window;
 
-    public Participant(final long addressUDP, final long addressTCP) throws Exception {
+    public Participant(final long addressTCP, final long addressUDP) throws Exception {
         this.addressTCP = addressTCP;
         this.addressUDP = addressUDP;
         server = new TCP.Server(addressTCP, this::handle);
@@ -547,18 +549,18 @@ public class Participant {
         final Dimension dimension = new Dimension(320, 240);
         final int framesPerSecond = 30;
 
-//        broadcaster = new UDP.Broadcaster(aeron);
-//        speaker = new Speaker(audioFormat);
-//        window = new Window(dimension, addressUDP);
-//        camera = new Camera(dimension, framesPerSecond, addressUDP);
-//        microphone = new Microphone(audioFormat, framesPerSecond, addressUDP);
-//        receiver = new UDP.Receiver(aeron, addressUDP);
-//
-//        broadcaster.subscribe(camera);
-//        broadcaster.subscribe(microphone);
-//        speaker.subscribe(receiver);
-//        window.subscribe(camera);
-//        window.subscribe(receiver);
+        broadcaster = new UDP.Broadcaster(aeron, addressUDP);
+        speaker = new Speaker(audioFormat);
+        window = new Window(dimension, addressUDP);
+        camera = new Camera(dimension, framesPerSecond, addressUDP);
+        microphone = new Microphone(audioFormat, framesPerSecond, addressUDP);
+        receiver = new UDP.Receiver(aeron, addressUDP);
+
+        broadcaster.subscribe(camera);
+        broadcaster.subscribe(microphone);
+        speaker.subscribe(receiver);
+        window.subscribe(camera);
+        window.subscribe(receiver);
     }
     
     public void host() throws IOException {
@@ -566,22 +568,25 @@ public class Participant {
         call = new Call(addressUDP);
     }
     
-    public void join(final long host) throws IOException {
+    public void join(final long hostTCP) throws IOException {
         leave();
-        call = new Call(host);
+        call = new Call(hostTCP);
+        call.addressUDPs.add(hostTCP);
+        broadcaster.addDestination(hostTCP);
+        
         final Packet packet = new Packet();
         packet.wrap(new byte[Packet.SIZE_METADATA]);
-        packet.setType(Packet.TYPE_JOIN).setAddress(this.addressUDP);
+        packet.setType(Packet.TYPE_JOIN).setAddressUDP(this.addressUDP);
         
-        final byte[] bytes = TCP.unicast(host, packet);
+        final byte[] bytes = TCP.unicast(hostTCP, packet);
         long participant = 0;
         for (int index = bytes.length - 1; index >= 0; index -= 1) {
             participant <<= 8;
             participant |= bytes[index] & 0xFF;
             if (index != bytes.length - 1 && index % 8 == 0) {
-                Logging.PARTICIPANT.log(Level.ALL, Address.longToString(participant));
+                Log.of(this).info(Address.longToString(participant));
                 call.addParticipant(participant);
-//                broadcaster.addDestination(participant);
+                broadcaster.addDestination(participant);
                 participant = 0;
             }
         }
@@ -591,8 +596,8 @@ public class Participant {
         if (call != null) {
             final Packet packet = new Packet();
             packet.wrap(new byte[Packet.SIZE_METADATA]);
-            packet.setType(Packet.TYPE_LEAVE).setAddress(addressUDP).setTime(System.nanoTime());
-            TCP.multicast(call.participants, packet);
+            packet.setType(Packet.TYPE_LEAVE).setAddressUDP(addressUDP).setTime(System.nanoTime());
+            TCP.multicast(call.addressUDPs, packet);
             call = null;
         }
     }
@@ -606,26 +611,26 @@ public class Participant {
 
     private void handleJoin(final Socket socket, final Packet packet) throws IOException {
         if (call != null) {
-            final long address = packet.address();
-            call.addParticipant(address);
-//            broadcaster.addDestination(address);
-            
             final OutputStream stream = socket.getOutputStream();
-            for (long participant : call.participants) {
+            for (long participant : call.addressUDPs) {
                 for (int index = 0; index <= 7; index += 1) {
                     stream.write((byte) (participant & 0xFF));
                     participant >>= 8;
                 }
             }
             stream.write('\n');
+            
+            final long address = packet.addressUDP();
+            call.addParticipant(address);
+            broadcaster.addDestination(address);
         }
     }
 
     private void handleLeave(final Socket socket, final Packet packet) {
         if (call != null) {
-            call.removeAddress(packet.address());
-            speaker.removeAddress(packet.address());
-            window.removeAddress(packet.address());
+            call.removeAddress(packet.addressUDP());
+//            speaker.removeAddress(packet.address());
+//            window.removeAddress(packet.address());
         }
     }
 
@@ -634,8 +639,8 @@ public class Participant {
         final Participant[] participants = new Participant[SIZE_PARTICIPANTS];
         for (int index = 0; index < participants.length; index += 1) {
             participants[index] = new Participant(
-                    Address.stringToLong("127.0.0.1:" + (20000 + (index * 2))),
-                    Address.stringToLong("127.0.0.1:" + (20000 + ((index * 2) + 1)))
+                Address.stringToLong("127.0.0.1:" + (20000 + (index * 2))),
+                Address.stringToLong("127.0.0.1:" + (20000 + ((index * 2) + 1)))
             );
         }
         participants[0].host();
