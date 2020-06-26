@@ -45,7 +45,7 @@ class Address {
         return output << 16 + Short.parseShort(input.substring(input.indexOf(':') + 1));
     }
 
-    private static String longToHost(long input) {
+    public static String longToHost(long input) {
         final StringBuilder builder = new StringBuilder();
         input = input >> 16;
         for (int index = 0; index < 4; index += 1) {
@@ -58,7 +58,7 @@ class Address {
         return builder.toString();
     }
 
-    private static short longToPort(final long input) {
+    public static short longToPort(final long input) {
         return (short) input;
     }
 }
@@ -69,7 +69,7 @@ class Logging {
     
     public static final Logger CAMERA = logger(Camera.class, Level.ALL);
     public static final Logger MICROPHONE = logger(Microphone.class, Level.ALL);
-    public static final Logger UDP_SENDER = logger(UDP.Sender.class, Level.ALL);
+    public static final Logger UDP_SENDER = logger(UDP.Broadcaster.class, Level.ALL);
     
     public static final Logger UDP_RECEIVER = logger(UDP.Receiver.class, Level.ALL);
     public static final Logger SPEAKER = logger(Speaker.class, Level.ALL);
@@ -421,21 +421,21 @@ class Call {
 }
 
 class TCP {
-    public static String send(final long address, final Packet packet) throws IOException {
-        final Socket socket = new Socket();
-        final OutputStream outputStream;
-        
-        socket.bind(Address.longToInetSocketAddress(address));
-        outputStream = socket.getOutputStream();
+    public static void multicast(final Packet packet) {}
+
+    public static Packet unicast(final long address, final Packet packet) throws IOException {
+        final Socket socket = new Socket(Address.longToHost(address), Address.longToPort(address));
+        final OutputStream outputStream = socket.getOutputStream();
         outputStream.write(packet.byteArray());
         outputStream.write('\n');
         
         final BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-        String response = reader.readLine();
+        final Packet response = new Packet();
+        response.wrap(reader.readLine().getBytes());
         socket.close();
         return response;
     }
-
+    
     static class Server {
         final Handler handler;
         final ServerSocket serverSocket;
@@ -450,13 +450,9 @@ class TCP {
                         final Packet packet = new Packet();
                         final Socket socket = serverSocket.accept();
                         final OutputStream outputStream = socket.getOutputStream();
-
-                        BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+                        final BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
                         packet.wrap(reader.readLine().getBytes());
-                        Packet response = handler.handle(packet);
-
-                        outputStream.write(response.byteArray());
-                        outputStream.write('\n');
+                        handler.handle(packet);
                     } catch (Exception exception) {
                         Logging.TCP_SERVER.log(Level.WARNING, exception.toString(), exception);
                     }
@@ -465,14 +461,14 @@ class TCP {
         }
     }
 
-    public interface Handler { Packet handle(Packet packet) throws IOException; }
+    public interface Handler { void handle(Packet packet) throws IOException; }
 }
 
 class UDP {
-    static class Sender extends Consumer {
+    static class Broadcaster extends Consumer {
         private final Publication publication;
 
-        public Sender(final Aeron aeron) throws SocketException {
+        public Broadcaster(final Aeron aeron) throws SocketException {
             super(0, (byte) 0b11000000);
             publication = aeron.addPublication("aeron:udp?control-mode=manual", 1);
             start();
@@ -533,7 +529,7 @@ public class Participant {
     
     private final Camera camera;
     private final Microphone microphone;
-    private final UDP.Sender sender;
+    private final UDP.Broadcaster broadcaster;
     private final UDP.Receiver receiver;
     private final Speaker speaker;
     private final Window window;
@@ -550,51 +546,54 @@ public class Participant {
         final Dimension dimension = new Dimension(320, 240);
         final int framesPerSecond = 30;
         
-        sender = new UDP.Sender(aeron);
+        broadcaster = new UDP.Broadcaster(aeron);
         speaker = new Speaker(audioFormat);
         window = new Window(dimension, addressUDP);
         camera = new Camera(dimension, framesPerSecond, addressUDP);
         microphone = new Microphone(audioFormat, framesPerSecond, addressUDP);
         receiver = new UDP.Receiver(aeron, addressUDP);
 
-        sender.subscribe(camera);
-        sender.subscribe(microphone);
+        broadcaster.subscribe(camera);
+        broadcaster.subscribe(microphone);
         speaker.subscribe(receiver);
         window.subscribe(camera);
         window.subscribe(receiver);
     }
     
-    public Packet handle(final Packet packet) throws IOException {
+    private void handle(final Packet packet) throws IOException {
         switch (packet.type()) {
-            case Packet.TYPE_JOIN: {
-                if (call != null) {
-                    final long address = packet.address();
-                    call.addParticipant(address);
-                    sender.addDestination(address);
-
-                    final Packet packetOutgoing = new Packet();
-                    packetOutgoing.wrap(new byte[Packet.SIZE_METADATA]);
-                    packetOutgoing.setType(Packet.TYPE_JOIN_REPLY).setAddress(this.addressUDP);
-                    TCP.send(packet.address(), packetOutgoing);
-
-                    packetOutgoing.setType(Packet.TYPE_JOIN);
-                    // sender.broadcast(packetOutgoing);
-                }
-                break;
-            }
-            case Packet.TYPE_JOIN_REPLY: {
-                break;
-            }
-            case Packet.TYPE_LEAVE: {
-                if (call != null) {
-                    call.removeAddress(packet.address());
-                    speaker.removeAddress(packet.address());
-                    window.removeAddress(packet.address());
-                }
-                break;
-            }
+            case Packet.TYPE_JOIN: handleJoin(packet);
+            case Packet.TYPE_JOIN_REPLY: handleJoinReply(packet);
+            case Packet.TYPE_LEAVE: handleLeave(packet);
         }
-        return packet;
+    }
+    
+    private void handleJoin(final Packet packet) throws IOException {
+        if (call != null) {
+            final long address = packet.address();
+            call.addParticipant(address);
+            broadcaster.addDestination(address);
+
+            final Packet output = new Packet();
+            output.wrap(new byte[Packet.SIZE_METADATA]);
+            output.setType(Packet.TYPE_JOIN_REPLY).setAddress(this.addressUDP);
+            TCP.unicast(packet.address(), output);
+
+            output.setType(Packet.TYPE_JOIN);
+            TCP.multicast(output);
+        }
+    }
+    
+    private void handleJoinReply(final Packet packet) {
+        
+    }
+    
+    private void handleLeave(final Packet packet) {
+        if (call != null) {
+            call.removeAddress(packet.address());
+            speaker.removeAddress(packet.address());
+            window.removeAddress(packet.address());
+        }
     }
     
     public void host() {
@@ -605,7 +604,7 @@ public class Participant {
         final Packet packet = new Packet();
         packet.wrap(new byte[Packet.SIZE_METADATA]);
         packet.setType(Packet.TYPE_JOIN).setAddress(this.addressUDP);
-        TCP.send(host, packet);
+        TCP.unicast(host, packet);
     }
 
     public void leave() {
@@ -613,7 +612,7 @@ public class Participant {
             final Packet packet = new Packet();
             packet.wrap(new byte[Packet.SIZE_METADATA]);
             packet.setType(Packet.TYPE_LEAVE).setAddress(addressUDP);
-            // sender.broadcast(packet);
+            TCP.multicast(packet);
             call = null;
         }
     }
