@@ -450,15 +450,11 @@ class Call {
 }
 
 class Client {
-    public String send(final String address, final String string) throws IOException {
-        final BufferedReader reader;
-        final Socket socket;
-        final String response;
-        
-        socket = new Socket(Address.stringToHost(address), Address.stringToPort(address));
+    public static String send(String address, String string) throws IOException {
+        Socket socket = new Socket(Address.stringToHost(address), Address.stringToPort(address));
         new DataOutputStream(socket.getOutputStream()).writeBytes(string);
-        reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-        response = reader.readLine();
+        BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+        String response = reader.readLine();
         socket.close();
         return response;
     }
@@ -467,14 +463,14 @@ class Client {
 class Server {
     final ServerSocket serverSocket;
     
-    public Server(final String addressTCP) throws IOException {
+    public Server(String addressTCP) throws IOException {
         serverSocket = new ServerSocket(Address.stringToPort(addressTCP));
         new Thread(() -> {
             while (true) {
                 try {
-                    final Socket socket = serverSocket.accept();
-                    final BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-                    final String string = reader.readLine();
+                    Socket socket = serverSocket.accept();
+                    BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+                    String string = reader.readLine();
                     new DataOutputStream(socket.getOutputStream()).writeBytes(string + '\n');
                 } catch (IOException exception) {
                     Logging.SERVER.log(Level.WARNING, exception.toString(), exception);
@@ -487,10 +483,6 @@ class Server {
 public class Participant extends Consumer {
     private static final MediaDriver mediaDriver = MediaDriver.launchEmbedded();
     private Call call;
-    private final String addressTCP;
-    private final String addressUDP;
-    private final Client client;
-    private final Server server;
     
 //    private final Sender sender;
 //    private final Speaker speaker;
@@ -499,13 +491,21 @@ public class Participant extends Consumer {
 //    private final Microphone microphone;
 //    private final Receiver receiver;
 
-    public Participant(
-        final String addressUDP,
-        final String addressTCP
-    ) throws LineUnavailableException, IOException {
+    public Participant(final String addressUDP, final String addressTCP) throws Exception {
         super(0, (byte) 0b00111000);
-        this.addressTCP = addressTCP;
-        this.addressUDP = addressUDP;
+        
+        Server server = new Server(addressTCP);
+        new Thread(() -> {
+            try {
+                Thread.sleep(2000);
+                String string = "Hello world\n";
+                Logging.PARTICIPANT.log(Level.ALL, Client.send("127.0.0.1:20001", string));
+                Logging.PARTICIPANT.log(Level.ALL, Client.send("127.0.0.1:20003", string));
+                Logging.PARTICIPANT.log(Level.ALL, Client.send("127.0.0.1:20005", string));
+            } catch (Exception exception) {
+                exception.printStackTrace();
+            }
+        }).start();
         
 //        Aeron.Context context = new Aeron.Context();
 //        context.aeronDirectoryName(mediaDriver.aeronDirectoryName());
@@ -514,13 +514,6 @@ public class Participant extends Consumer {
 //        final Dimension dimension = new Dimension(320, 240);
 //        final int framesPerSecond = 30;
         
-        final String string = "Hello world\n";
-        server = new Server(addressTCP);
-        client = new Client();
-        Logging.PARTICIPANT.log(Level.ALL, client.send(addressTCP, string));
-        Logging.PARTICIPANT.log(Level.ALL, client.send(addressTCP, string));
-        Logging.PARTICIPANT.log(Level.ALL, client.send(addressTCP, string));
-
 //        sender = new Sender(aeron, addressUDP);
 //        speaker = new Speaker(audioFormat);
 //        window = new Window(dimension, addressUDP);
@@ -588,7 +581,7 @@ public class Participant extends Consumer {
 //        }
     }
     
-    public static void main(final String[] arguments) throws LineUnavailableException, IOException {
+    public static void main(final String[] arguments) throws Exception {
         final Participant[] participants = {
             new Participant("127.0.0.1:20000", "127.0.0.1:20001"),
             new Participant("127.0.0.1:20002", "127.0.0.1:20003"),
