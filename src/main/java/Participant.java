@@ -22,6 +22,7 @@ import java.awt.event.ActionEvent;
 import java.awt.image.BufferedImage;
 import java.io.*;
 import java.net.*;
+import java.util.Collection;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -430,7 +431,7 @@ class Call {
 }
 
 class TCP {
-    public static void multicast(final Set<Long> addressTCPs, final Packet packet) throws IOException {
+    public static void multicast(final Collection<Long> addressTCPs, final Packet packet) throws IOException {
         for (final long addressTCP : addressTCPs) unicast(addressTCP, packet);
     }
     
@@ -442,7 +443,12 @@ class TCP {
         outputStream.write('\n');
         
         final BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-        final byte[] bytes = reader.readLine().getBytes();
+        byte[] bytes;
+        try {
+            bytes = reader.readLine().getBytes();
+        } catch (Exception exception) {
+            bytes = null;
+        }
         socket.close();
         return bytes;
     }
@@ -611,7 +617,14 @@ public class Participant {
             final Packet packet = new Packet();
             packet.wrap(new byte[Packet.SIZE_METADATA]);
             packet.setType(Packet.TYPE_LEAVE).setAddressUDP(addressUDP).setTime(System.nanoTime());
-//            TCP.multicast(call.addressUDPs, packet);
+            TCP.multicast(call.addressUDPtoAddressTCP.values(), packet);
+            
+            camera.stop();
+            microphone.stop();
+            broadcaster.stop();
+            receiver.stop();
+            speaker.stop();
+            window.stop();
             call = null;
         }
     }
@@ -624,6 +637,7 @@ public class Participant {
     }
 
     private void handleJoin(final Socket socket, final Packet packet) throws IOException {
+        final OutputStream stream = socket.getOutputStream();
         if (call != null) {
             final long addressTCPJoiner = packet.getLong(0);
             final long addressUDPJoiner = packet.addressUDP();
@@ -635,7 +649,6 @@ public class Participant {
                 + " call.addressUDPtoAddressTCP.size()=" + call.addressUDPtoAddressTCP.size()
             );
             
-            final OutputStream stream = socket.getOutputStream();
             if (call.addressUDPHost == this.addressUDP) {
                 Streaming.writeLong(stream, this.addressTCP);
                 Streaming.writeLong(stream, this.addressUDP);
@@ -646,16 +659,17 @@ public class Participant {
                     }
                 }
             }
-            stream.write('\n');
         }
+        stream.write('\n');
     }
 
-    private void handleLeave(final Socket socket, final Packet packet) {
+    private void handleLeave(final Socket socket, final Packet packet) throws IOException {
         if (call != null) {
             call.removeAddressPair(packet.addressUDP());
-//            speaker.removeAddress(packet.address());
-//            window.removeAddress(packet.address());
+            speaker.removeAddressUDP(packet.addressUDP());
+            window.removeAddressUDP(packet.addressUDP());
         }
+        socket.getOutputStream().write('\n');
     }
 
     public static void main(final String[] arguments) throws Exception {
@@ -671,5 +685,6 @@ public class Participant {
         for (int index = 1; index < participants.length; index += 1) {
             participants[index].join(participants[0].addressTCP);
         }
+        participants[2].leave();
     }
 }
