@@ -9,6 +9,7 @@ import org.agrona.DirectBuffer;
 import org.agrona.collections.Long2ObjectHashMap;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.io.DirectBufferInputStream;
+import org.apache.commons.math3.analysis.function.Add;
 import org.openimaj.image.ImageUtilities;
 import org.openimaj.video.capture.VideoCapture;
 import org.openimaj.video.capture.VideoCaptureException;
@@ -27,7 +28,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.*;
 import java.util.regex.Pattern;
-import java.util.stream.Stream;
 
 class Addressing {
     public static String longToString(long input) {
@@ -413,19 +413,19 @@ class Window extends Consumer {
 }
 
 class Call {
-    public final ConcurrentHashMap.KeySetView<Long, Boolean> addressUDPs = ConcurrentHashMap.newKeySet();
+    public final ConcurrentHashMap<Long, Long> addressUDPtoAddressTCP = new ConcurrentHashMap<>();
     public final long addressUDPHost;
     
     public Call(final long addressUDPHost) {
         this.addressUDPHost = addressUDPHost;
     }
 
-    public void addAddressUDP(final long addressUDP) {
-        addressUDPs.add(addressUDP);
+    public void addAddressPair(final long addressTCP, final long addressUDP) {
+        addressUDPtoAddressTCP.put(addressUDP, addressTCP);
     }
 
-    public void removeAddressUDP(final long addressUDP) {
-//        addressUDPs.remove(addressUDP);
+    public void removeAddressPair(final long addressUDP) {
+        // addressUDPtoAddressTCP.remove(addressUDP);
     }
 }
 
@@ -435,7 +435,7 @@ class TCP {
     }
     
     public static byte[] unicast(final long addressTCP, final Packet packet) throws IOException {
-        Logging.of(TCP.class).info("destination=" + Addressing.longToString(addressTCP));
+        Logging.of(TCP.class).info("addressTCP=" + Addressing.longToPort(addressTCP));
         final Socket socket = new Socket(Addressing.longToHost(addressTCP), Addressing.longToPort(addressTCP));
         final OutputStream outputStream = socket.getOutputStream();
         outputStream.write(packet.byteArray());
@@ -455,7 +455,7 @@ class TCP {
             this.handler = handler;
             serverSocket = new ServerSocket();
             serverSocket.bind(Addressing.longToInetSocketAddress(addressTCP));
-            Logging.of(this).info("origin=" + Addressing.longToString(addressTCP));
+            Logging.of(this).info("addressTCP=" + Addressing.longToPort(addressTCP));
             new Thread(() -> {
                 while (true) {
                     try {
@@ -489,8 +489,8 @@ class UDP {
 
         public void addAddressUDP(final long addressUDP) {
             Logging.of(this).info(
-                "origin=" + Addressing.longToString(this.addressUDP)
-                + " destination=" + Addressing.longToString(addressUDP)
+                "this.addressUDP=" + Addressing.longToPort(this.addressUDP)
+                + " addressUDP=" + Addressing.longToPort(addressUDP)
             );
             publication.addDestination("aeron:udp?endpoint=" + Addressing.longToString(addressUDP));
         }
@@ -579,6 +579,7 @@ public class Participant {
     
     public void host() throws IOException {
         leave();
+        Logging.of(this).info("this.addressUDP=" + Addressing.longToPort(this.addressUDP));
         call = new Call(addressUDP);
     }
     
@@ -586,18 +587,22 @@ public class Participant {
         leave();
         
         final Packet packet = new Packet();
-        packet.wrap(new byte[Packet.SIZE_METADATA]);
+        packet.wrap(new byte[8 + Packet.SIZE_METADATA]);
+        packet.putLong(0, this.addressTCP);
         packet.setType(Packet.TYPE_JOIN).setAddressUDP(this.addressUDP);
         
         final byte[] bytes = TCP.unicast(addressTCPHost, packet);
-        for (int index = bytes.length - 1 - 7; index >= 0; index -= 8) {
-            final long addressUDP = Streaming.readLong(bytes, index);
+        for (int index = 0; index < bytes.length; index += 16) {
+            final long addressTCP = Streaming.readLong(bytes, index);
+            final long addressUDP = Streaming.readLong(bytes, index + 8);
             broadcaster.addAddressUDP(addressUDP);
-            if (index == bytes.length - 1 - 7) {
+            if (addressTCP == addressTCPHost) {
+                Logging.of(this).info("this.addressUDP=" + Addressing.longToPort(this.addressUDP));
                 call = new Call(addressUDP);
                 continue;
             }
-            call.addAddressUDP(addressUDP);
+            call.addAddressPair(addressTCP, addressUDP);
+            TCP.unicast(addressTCP, packet);
         }
     }
 
@@ -606,7 +611,7 @@ public class Participant {
             final Packet packet = new Packet();
             packet.wrap(new byte[Packet.SIZE_METADATA]);
             packet.setType(Packet.TYPE_LEAVE).setAddressUDP(addressUDP).setTime(System.nanoTime());
-            TCP.multicast(call.addressUDPs, packet);
+//            TCP.multicast(call.addressUDPs, packet);
             call = null;
         }
     }
@@ -620,15 +625,25 @@ public class Participant {
 
     private void handleJoin(final Socket socket, final Packet packet) throws IOException {
         if (call != null) {
+            final long addressTCPJoiner = packet.getLong(0);
             final long addressUDPJoiner = packet.addressUDP();
-            call.addAddressUDP(addressUDPJoiner);
+            call.addAddressPair(addressTCPJoiner, addressUDPJoiner);
             broadcaster.addAddressUDP(addressUDPJoiner);
-
+            Logging.of(this).info(
+            "this.addressUDP=" + Addressing.longToPort(this.addressUDP)
+                + " addressUDPJoiner=" + Addressing.longToPort(packet.getLong(0))
+                + " call.addressUDPtoAddressTCP.size()=" + call.addressUDPtoAddressTCP.size()
+            );
+            
             final OutputStream stream = socket.getOutputStream();
             if (call.addressUDPHost == this.addressUDP) {
-                Streaming.writeLong(stream, call.addressUDPHost);
-                for (long addressUDP : call.addressUDPs) {
-                    if (addressUDP != addressUDPJoiner) Streaming.writeLong(stream, addressUDP);
+                Streaming.writeLong(stream, this.addressTCP);
+                Streaming.writeLong(stream, this.addressUDP);
+                for (Map.Entry<Long, Long> entry : call.addressUDPtoAddressTCP.entrySet()) {
+                    if (entry.getKey() != addressUDPJoiner) {
+                        Streaming.writeLong(stream, entry.getValue());
+                        Streaming.writeLong(stream, entry.getKey());
+                    }
                 }
             }
             stream.write('\n');
@@ -637,7 +652,7 @@ public class Participant {
 
     private void handleLeave(final Socket socket, final Packet packet) {
         if (call != null) {
-            call.removeAddressUDP(packet.addressUDP());
+            call.removeAddressPair(packet.addressUDP());
 //            speaker.removeAddress(packet.address());
 //            window.removeAddress(packet.address());
         }
